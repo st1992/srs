@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!--
+  SIPREC UAC Load Test Scenario — Signaling Only
+  ================================================
+  Simulates a Session Recording Client (SRC / SBC) sending SIPREC INVITEs
+  to the StreamLink Session Recording Server (SRS).
+
+  Flow:
+    SIPp (SRC)  ──INVITE (multipart: SDP + rs-metadata)──►  StreamLink (SRS)
+                ◄──────────────────────── 100 Trying ───────
+                ◄──────────────────────── 200 OK ────────────
+    SIPp (SRC)  ──ACK ──────────────────────────────────────►
+                   [pause: call duration]
+    SIPp (SRC)  ──BYE ──────────────────────────────────────►
+                ◄──────────────────────── 200 OK ────────────
+
+  No RTP is sent in this scenario (signaling-throughput / CPS testing).
+  Use siprec_uac_audio.xml for RTP recording load tests.
+
+  Key SIPp flags to combine with this scenario:
+    -l  <max_concurrent>   simultaneous calls cap
+    -m  <total>            total calls to complete then exit
+    -r  <rate>             new calls per second
+    -d  <ms>               call hold duration (overrides <pause/> default)
+    -mp <port>             first media port (step = 4 per call: 2 streams x RTP+RTCP)
+-->
+
+<scenario name="SIPREC UAC - Signaling Load Test">
+
+  <!-- ================================================================
+       Step 1 - Send SIPREC INVITE
+       The body is multipart/mixed with:
+         Part 1: application/sdp        - dual-leg offer (sendonly)
+         Part 2: application/rs-metadata+xml - RFC 7865 recording metadata
+       ================================================================ -->
+  <send retrans="500">
+    <![CDATA[
+INVITE sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+From: <sip:src@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+To: <sip:srs@[remote_ip]:[remote_port]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:src@[local_ip]:[local_port];+sip.src>
+Require: siprec
+Max-Forwards: 70
+Content-Type: multipart/mixed;boundary="siprec-boundary"
+Content-Length: [len]
+
+--siprec-boundary
+Content-Type: application/sdp
+
+v=0
+o=sipp 0 0 IN IP4 [local_ip]
+s=SIPREC Load Test
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=ptime:20
+a=sendonly
+a=label:inbound
+m=audio [media_port+2] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=ptime:20
+a=sendonly
+a=label:outbound
+
+--siprec-boundary
+Content-Type: application/rs-metadata+xml
+Content-Disposition: recording-session
+
+<?xml version="1.0" encoding="UTF-8"?>
+<recording xmlns='urn:ietf:params:xml:ns:recording:1'>
+  <datamode>complete</datamode>
+  <session session_id="sess-[call_number]">
+    <sipSessionID>[call_id]</sipSessionID>
+  </session>
+  <participant participant_id="caller-[call_number]">
+    <nameID aor="sip:caller[call_number]@sipp.test">
+      <name>Caller [call_number]</name>
+    </nameID>
+  </participant>
+  <participant participant_id="callee-[call_number]">
+    <nameID aor="sip:callee[call_number]@sipp.test">
+      <name>Callee [call_number]</name>
+    </nameID>
+  </participant>
+  <stream stream_id="stream-in-[call_number]" session_id="sess-[call_number]">
+    <label>inbound</label>
+  </stream>
+  <stream stream_id="stream-out-[call_number]" session_id="sess-[call_number]">
+    <label>outbound</label>
+  </stream>
+  <participantsessionassoc participant_id="caller-[call_number]" session_id="sess-[call_number]"/>
+  <participantsessionassoc participant_id="callee-[call_number]" session_id="sess-[call_number]"/>
+  <participantstreamassoc participant_id="caller-[call_number]">
+    <send>stream-in-[call_number]</send>
+    <recv>stream-out-[call_number]</recv>
+  </participantstreamassoc>
+  <participantstreamassoc participant_id="callee-[call_number]">
+    <send>stream-out-[call_number]</send>
+    <recv>stream-in-[call_number]</recv>
+  </participantstreamassoc>
+</recording>
+--siprec-boundary--
+
+    ]]>
+  </send>
+
+  <!-- ================================================================
+       Step 2 - Receive 100 Trying (optional - some servers omit it)
+       rtd="true" starts the response-time timer for the INVITE.
+       ================================================================ -->
+  <recv response="100" optional="true" rtd="true"/>
+
+  <!-- ================================================================
+       Step 3 - Receive 200 OK with combined SIPREC SDP answer
+       StreamLink answers with two recvonly m= lines; we do not parse
+       the ports here (no RTP is sent in this signaling-only scenario).
+       ================================================================ -->
+  <!-- [last_To] automatically captures the full To header (with tag) from this response -->
+  <recv response="200" rtd="true"/>
+
+  <!-- ================================================================
+       Step 4 - Send ACK to complete the three-way handshake
+       ================================================================ -->
+  <send>
+    <![CDATA[
+ACK sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+From: <sip:src@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+To: [last_To]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Contact: <sip:src@[local_ip]:[local_port]>
+Max-Forwards: 70
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- ================================================================
+       Step 5 - Hold the call for the configured duration.
+       Default: 5 seconds.  Override with SIPp -d <ms> flag.
+       ================================================================ -->
+  <pause milliseconds="5000"/>
+
+  <!-- ================================================================
+       Step 6 - Send BYE to terminate the recording session
+       ================================================================ -->
+  <send retrans="500">
+    <![CDATA[
+BYE sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+From: <sip:src@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+To: [last_To]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Contact: <sip:src@[local_ip]:[local_port]>
+Max-Forwards: 70
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- ================================================================
+       Step 7 - Receive 200 OK to BYE
+       ================================================================ -->
+  <recv response="200"/>
+
+  <!-- Gather per-call response time statistics -->
+  <ResponseTimeRepartition value="10, 20, 30, 50, 100, 150, 200, 500"/>
+  <CallLengthRepartition value="1000, 5000, 10000, 30000, 60000"/>
+
+</scenario>

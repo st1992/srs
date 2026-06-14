@@ -1,0 +1,53 @@
+# Binaries
+/siprec-recorder
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go test and coverage artifacts
+*.test
+*.out
+coverage.html
+coverage.txt
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Dependency vendoring
+vendor/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local configuration (copy from config.example.yaml)
+config.yaml
+
+# Recordings and media output
+recordings/
+*.ulaw
+
+# GCP service account keys and secrets
+*-credentials.json
+*-service-account.json
+credentials.json
+service-account*.json
+*.pem
+
+# Environment files with secrets
+.env
+.env.*
+!.env.example
+
+# SIPp load test output
+sipp-load-test/logs/

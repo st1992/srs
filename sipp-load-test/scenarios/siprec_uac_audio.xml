@@ -1,0 +1,200 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!--
+  SIPREC UAC Load Test Scenario - With RTP Audio (PCAP)
+  ======================================================
+  Extends siprec_uac.xml to stream real G.711 u-law audio to StreamLink
+  after the INVITE/ACK handshake.  This exercises the full recording pipeline:
+  signaling + RTP reception + .ulaw file writing.
+
+  Prerequisites
+  =============
+  1. SIPp compiled with PCAP support (==enable-pcap or package sipp-crypt on
+     most distros).  Verify with:  sipp -v 2>&1 | grep -i pcap
+  2. A G.711 u-law PCAP file containing RTP packets (PT=0, 8 kHz).
+     Generate one with the helper script:
+       ./scripts/generate_pcap.sh
+     This produces  audio/g711_8k_mono.pcap
+  3. Run SIPp with the -mi flag pointing to your local media IP so that
+     the RTP source address is routable from StreamLink.
+
+  How RTP streaming works
+  =======================
+  - SIPp reserves [media_port] and [media_port+2] before sending the INVITE.
+  - After the ACK the scenario uses nop with exec="play_pcap_audio" actions
+    to replay the PCAP file on each port concurrently.
+  - StreamLink receives the RTP on the ports it advertised in its 200 OK SDP
+    and writes raw PCMU payloads to .ulaw files.
+
+  NOTE: play_pcap_audio sends to the remote port it detects from the SDP
+  answer, so port parsing (ereg on 200 OK body) is used to feed the correct
+  destination ports.
+
+  Key SIPp flags:
+    -mi <media_ip>   local IP for RTP (must match the offer SDP c= line)
+    -mp <port>       starting media port (step 4 per call: 2 streams x RTP+RTCP)
+    -l  <max>        max concurrent calls
+    -r  <cps>        call rate
+    -d  <ms>         call duration / pause time
+-->
+
+<scenario name="SIPREC UAC - Full RTP Audio Load Test">
+
+  <!-- ================================================================
+       Step 1 - Send SIPREC INVITE with dual-stream sendonly SDP
+       ================================================================ -->
+  <send retrans="500">
+    <![CDATA[
+INVITE sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+From: <sip:src@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+To: <sip:srs@[remote_ip]:[remote_port]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:src@[local_ip]:[local_port];+sip.src>
+Require: siprec
+Max-Forwards: 70
+Content-Type: multipart/mixed;boundary="siprec-boundary"
+Content-Length: [len]
+
+--siprec-boundary
+Content-Type: application/sdp
+
+v=0
+o=sipp 0 0 IN IP4 [local_ip]
+s=SIPREC Audio Load Test
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=ptime:20
+a=sendonly
+a=label:inbound
+m=audio [media_port+2] RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=ptime:20
+a=sendonly
+a=label:outbound
+
+--siprec-boundary
+Content-Type: application/rs-metadata+xml
+Content-Disposition: recording-session
+
+<?xml version="1.0" encoding="UTF-8"?>
+<recording xmlns='urn:ietf:params:xml:ns:recording:1'>
+  <datamode>complete</datamode>
+  <session session_id="sess-[call_number]">
+    <sipSessionID>[call_id]</sipSessionID>
+  </session>
+  <participant participant_id="caller-[call_number]">
+    <nameID aor="sip:caller[call_number]@sipp.test">
+      <name>Caller [call_number]</name>
+    </nameID>
+  </participant>
+  <participant participant_id="callee-[call_number]">
+    <nameID aor="sip:callee[call_number]@sipp.test">
+      <name>Callee [call_number]</name>
+    </nameID>
+  </participant>
+  <stream stream_id="stream-in-[call_number]" session_id="sess-[call_number]">
+    <label>inbound</label>
+  </stream>
+  <stream stream_id="stream-out-[call_number]" session_id="sess-[call_number]">
+    <label>outbound</label>
+  </stream>
+  <participantsessionassoc participant_id="caller-[call_number]" session_id="sess-[call_number]"/>
+  <participantsessionassoc participant_id="callee-[call_number]" session_id="sess-[call_number]"/>
+  <participantstreamassoc participant_id="caller-[call_number]">
+    <send>stream-in-[call_number]</send>
+    <recv>stream-out-[call_number]</recv>
+  </participantstreamassoc>
+  <participantstreamassoc participant_id="callee-[call_number]">
+    <send>stream-out-[call_number]</send>
+    <recv>stream-in-[call_number]</recv>
+  </participantstreamassoc>
+</recording>
+--siprec-boundary--
+
+    ]]>
+  </send>
+
+  <recv response="100" optional="true" rtd="true"/>
+
+  <!-- ================================================================
+       Step 2 - Receive 200 OK; extract RTP ports from StreamLink's SDP.
+       StreamLink answers with two m= audio lines (recvonly).  We parse
+       the first two port numbers to use as RTP destinations.
+       ================================================================ -->
+  <!-- [last_To] automatically captures the full To header (with tag) from this response -->
+  <recv response="200" rtd="true"/>
+
+  <!-- ================================================================
+       Step 3 - ACK to complete the handshake
+       ================================================================ -->
+  <send>
+    <![CDATA[
+ACK sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+From: <sip:src@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+To: [last_To]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Contact: <sip:src@[local_ip]:[local_port]>
+Max-Forwards: 70
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- ================================================================
+       Step 4 - Stream RTP audio to StreamLink's recording ports.
+       play_pcap_audio replays the PCAP file to [remote_ip]:<port>.
+       Both legs play the same audio file in parallel using the two
+       reserved SIPp media ports.
+       ================================================================ -->
+  <!-- Stream inbound leg audio; SIPp sends from [media_port] to StreamLink's
+       media IP. The -mi flag on the sipp command sets the local RTP source IP.
+       play_pcap_audio format: localIP:localPort-remoteIP:remotePort -->
+  <nop>
+    <action>
+      <exec play_pcap_audio="[local_ip]:[media_port]-[remote_ip]:[media_port]"/>
+    </action>
+  </nop>
+
+  <nop>
+    <action>
+      <exec play_pcap_audio="[local_ip]:[media_port+2]-[remote_ip]:[media_port+2]"/>
+    </action>
+  </nop>
+
+  <!-- ================================================================
+       Step 5 - Hold call for configured duration (default 10 s).
+       Set with SIPp -d <ms> flag when running the test.
+       ================================================================ -->
+  <pause milliseconds="10000"/>
+
+  <!-- ================================================================
+       Step 6 - BYE
+       ================================================================ -->
+  <send retrans="500">
+    <![CDATA[
+BYE sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+From: <sip:src@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+To: [last_To]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Contact: <sip:src@[local_ip]:[local_port]>
+Max-Forwards: 70
+Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv response="200"/>
+
+  <ResponseTimeRepartition value="10, 20, 30, 50, 100, 150, 200, 500"/>
+  <CallLengthRepartition value="1000, 5000, 10000, 30000, 60000"/>
+
+</scenario>

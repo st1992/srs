@@ -1,0 +1,37 @@
+# SIPREC Recorder configuration
+
+# Address the SIP server listens on (UDP).
+sip_listen_addr: "0.0.0.0:5060"
+
+# IP advertised in SDP answers for RTP media. Leave empty to auto-detect
+# the first non-loopback IPv4 address on the host.
+media_ip: ""
+
+# UDP port range used to receive RTP for recording legs (inclusive).
+rtp_port_start: 10000
+rtp_port_end: 11000
+
+# Directory where .ulaw recording files are written.
+recording_dir: "./recordings"
+
+# GCP Cloud Pub/Sub settings. Leave project/topic empty to disable publishing.
+pubsub_project_id: ""
+pubsub_topic_id: ""
+
+# Optional path to a GCP service account JSON key. If empty, Application
+# Default Credentials are used (e.g. GKE Workload Identity).
+gcp_credentials_file: ""
+
+# Google Cloud Storage upload settings.
+# Leave gcs_bucket empty to disable uploading (recordings stay on local disk).
+gcs_bucket: ""
+gcs_object_prefix: "recordings"
+
+# Delete the local .ulaw file only after a successful GCS upload.
+delete_after_upload: true
+
+# Upload tuning.
+upload_workers: 2
+upload_max_retries: 5
+upload_sweep_interval_sec: 60
+shutdown_upload_timeout_sec: 30
