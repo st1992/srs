@@ -32,7 +32,10 @@ data:
     log_stderror=yes
     log_facility=LOG_LOCAL0
 
-    fork=yes
+    # Run in the foreground; container runtime handles process supervision.
+    # fork=no keeps PID 1 attached so Kubernetes sees the real Kamailio process
+    # and SIGTERM is delivered correctly during pod termination.
+    fork=no
     children={{ .Values.kamailio.children }}
 
     # With hostNetwork=true the pod inherits the node's interfaces;

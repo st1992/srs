@@ -110,6 +110,18 @@ spec:
           image: "{{ .Values.kamailio.image.repository }}:{{ .Values.kamailio.image.tag }}"
           imagePullPolicy: {{ .Values.kamailio.image.pullPolicy }}
 
+          # Run Kamailio in the foreground so the container's PID 1 is the
+          # actual Kamailio process:
+          #   -DD : do-not-fork (stay attached to the controlling terminal)
+          #   -E  : log to stderr (kubectl logs sees everything)
+          #   -f  : explicit config path
+          command: ["kamailio"]
+          args:
+            - "-DD"
+            - "-E"
+            - "-f"
+            - "/etc/kamailio/kamailio.cfg"
+
           # hostNetwork shares the host ports; declaring them here is
           # informational and enables hostPort mapping for kube-proxy awareness.
           ports:
@@ -126,25 +138,26 @@ spec:
             {{- toYaml .Values.kamailio.resources | nindent 12 }}
 
           # ── Health probes ──────────────────────────────────────────────────
-          # Liveness: verify that Kamailio is still binding the SIP port.
+          # Verify UDP 5060 is bound by reading /proc/net/udp directly.
+          # This avoids depending on `ss` / `netstat` being present in the image.
+          # 13C4 is hex(5060); column 2 is the local address:port.
           livenessProbe:
             exec:
               command:
                 - /bin/sh
                 - -c
-                - "ss -lnu 2>/dev/null | grep -q ':5060 '"
+                - "grep -qE ':13C4 ' /proc/net/udp"
             initialDelaySeconds: 15
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
 
-          # Readiness: same port check; also used by the Service endpoint controller.
           readinessProbe:
             exec:
               command:
                 - /bin/sh
                 - -c
-                - "ss -lnu 2>/dev/null | grep -q ':5060 '"
+                - "grep -qE ':13C4 ' /proc/net/udp"
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3
