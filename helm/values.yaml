@@ -174,7 +174,7 @@ siprecRecorder:
 
     # GCS — audio recordings (leave gcsBucket empty to keep on local disk only)
     gcsBucket: "cx-siprec-audio-raw"
-    gcsObjectPrefix: "recordings"
+    gcsObjectPrefix: "rec"
 
     # GCS — per-call metadata JSON files (separate bucket from recordings)
     gcsMetadataBucket: "cx-siprec-metadata"
