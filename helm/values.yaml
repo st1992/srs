@@ -64,12 +64,32 @@ kamailio:
   service:
     type: LoadBalancer
     port: 5060
+
+    # Static internal VIP shared between this Service (SIP/5060) and the
+    # recorder media Service (RTP port range). Pre-reserve the address in
+    # the VPC subnet, e.g.:
+    #
+    #   gcloud compute addresses create siprec-vip \
+    #     --region us-central1 --subnet <subnet> \
+    #     --addresses 100.73.16.5 --purpose=SHARED_LOADBALANCER_VIP
+    #
+    # Leave empty to let GKE allocate, but then sharing the VIP with the
+    # recorder media Service won't work — both Services must explicitly
+    # request the same loadBalancerIP.
+    loadBalancerIP: "100.73.16.5"
+
     # GKE Internal Passthrough Network Load Balancer (L4).
     # Exposes Kamailio on a private VPC IP — no public internet exposure.
     # externalTrafficPolicy: Local (set in the template) makes GCP skip SNAT
     # so the real SBC source IP reaches Kamailio.
     annotations:
       networking.gke.io/load-balancer-type: "Internal"
+      # Required for sharing the VIP with the recorder media Service.
+      # Both Services must carry this annotation and request the same
+      # loadBalancerIP. GKE will then create two forwarding rules on the
+      # same address — one for SIP/5060 → Kamailio backends, one for RTP
+      # ports → recorder backends.
+      networking.gke.io/internal-load-balancer-shared-vip: "true"
       # Optional: pin the NLB to a specific subnet.
       # networking.gke.io/internal-load-balancer-subnet: "your-subnet-name"
       # Optional: allow-list source CIDRs (SBC address ranges).
@@ -178,15 +198,38 @@ siprecRecorder:
   config:
     sipListenAddr: "0.0.0.0:5060"
 
-    # Leave empty — the recorder auto-detects the node's non-loopback IPv4
-    # address, which is correct when hostNetwork: true is set.
+    # Address stamped into the SDP "c=" line of the 200 OK answer — i.e. the
+    # IP the SBC will send RTP to. We deliberately advertise the shared
+    # Internal Passthrough NLB VIP (100.73.16.5) here, NOT the recorder's
+    # own node IP:
+    #
+    #   SBC ──RTP──▶ 100.73.16.5 (NLB VIP)
+    #                      │  passthrough, preserves dst port
+    #                      ▼
+    #                recorder node:<rtpPort>
+    #
+    # The GCP Internal Passthrough NLB fronting this stack must therefore
+    # forward the full rtpPortStart–rtpPortEnd UDP range (in addition to
+    # 5060 for SIP) to the recorder DaemonSet's nodes. Each recorder pod
+    # binds 0.0.0.0:<rtpPort> via hostNetwork, so once the packet hits any
+    # recorder node on the right port it lands on the correct rtpRecorder.
+    #
+    # Leave this empty ONLY when the SBC can reach the recorder nodes
+    # directly (no LB in front) — in that case detectMediaIP() will pick
+    # the node's primary VPC IP automatically.
     mediaIP: "100.73.16.5"
 
-    # RTP port range.  Each concurrent SIPREC session consumes 2 UDP ports
-    # (one per audio leg).  10000–30000 = 20 000 ports = up to 10 000 sessions,
-    # which is well within what a single c2-standard-4 can sustain CPU-wise.
-    rtpPortStart: 10000
-    rtpPortEnd: 30000
+    # RTP port range. Each concurrent SIPREC session consumes 2 UDP ports
+    # (one per audio leg).
+    #
+    # When fronted by the shared-VIP Internal Passthrough NLB (see
+    # `mediaService` below), every port in this range MUST be enumerated
+    # individually in the recorder media Service spec — Kubernetes Services
+    # don't accept port ranges. Keep the range small enough that the
+    # Service manifest stays manageable; 100 ports = 50 concurrent sessions.
+    # Widen by editing both the range here AND mediaService.rtpPortCount.
+    rtpPortStart: 16384
+    rtpPortEnd: 16483
 
     recordingDir: "/app/recordings"
 
@@ -204,3 +247,34 @@ siprecRecorder:
     uploadMaxRetries: 5
     uploadSweepIntervalSec: 60
     shutdownUploadTimeoutSec: 30
+
+  # ── Recorder media Service (shared-VIP Internal Passthrough NLB) ───────────
+  #
+  # Exposes the recorder DaemonSet's RTP port range on the same Internal NLB
+  # VIP that fronts Kamailio. The two Services share the VIP via the
+  # `internal-load-balancer-shared-vip` annotation; GCP renders this as two
+  # forwarding rules on one IP (one for SIP/5060 → kamailio pods, one for
+  # the RTP ports → recorder pods).
+  #
+  # IMPORTANT — 5-tuple hashing caveat:
+  # GCP Internal Passthrough NLB hashes each flow's 5-tuple and pins it to
+  # one backend node. The recorder pod on that node must already be bound
+  # to the negotiated UDP port, otherwise the RTP packet is dropped. With
+  # multiple recorder nodes and the current `ListenUDPEvenPortRange` logic,
+  # each recorder picks ports independently — there's no coordination, so
+  # roughly (N-1)/N of all flows would land on a node whose recorder pod
+  # didn't allocate that port. Two safe configurations:
+  #
+  #   1. Keep the recorder DaemonSet at a single labelled node — every
+  #      port in the range lives on one node, hashing is trivially correct.
+  #   2. Statically partition the port range per recorder pod and create
+  #      one shared-VIP Service per pod, each enumerating its own slice.
+  #
+  # This default targets configuration (1).
+  mediaService:
+    enabled: true
+    type: LoadBalancer
+    loadBalancerIP: "100.73.16.5"
+    annotations:
+      networking.gke.io/load-balancer-type: "Internal"
+      networking.gke.io/internal-load-balancer-shared-vip: "true"
