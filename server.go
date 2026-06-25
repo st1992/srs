@@ -137,8 +137,12 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 
 	log.Info("processing SIPREC INVITE")
 
-	// Capture call metadata used for file naming.
-	startTimeMs := time.Now().UnixMilli()
+	// Capture call metadata used for file naming and event timestamps.
+	// Both are derived from the same time.Now() so the Unix-millisecond
+	// component in the file name matches the ISO 8601 timestamp in the event.
+	startTime := time.Now().UTC()
+	startTimeMs := startTime.UnixMilli()
+	startTimeISO := startTime.Format(time.RFC3339Nano)
 	dnis := toURI(req)
 	ani := fromURI(req)
 
@@ -245,12 +249,14 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 		Headers:   collectSIPHeaders(req),
 		Metadata:  meta,
 		Legs:      recorders,
-		CreatedAt: time.Now(),
+		StartTime: startTimeISO,
+		CreatedAt: startTime,
 	}
 	s.sessions.Set(callID, sess)
 
 	s.pub.Publish(context.Background(), &SiprecEvent{
 		Event:          EventCallStart,
+		Timestamp:      sess.StartTime,
 		SIPCallID:      callID,
 		From:           sess.From,
 		To:             sess.To,
@@ -277,6 +283,7 @@ func (s *recorderServer) onAck(_ *slog.Logger, req *sip.Request, _ sip.ServerTra
 
 // onBye terminates a SIPREC session, closes recordings, and publishes call_end.
 func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTransaction) {
+	endTimeISO := time.Now().UTC().Format(time.RFC3339Nano)
 	callID := callIDValue(req)
 	s.respond(tx, req, sip.StatusOK, "OK", nil)
 
@@ -310,6 +317,7 @@ func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTr
 
 	s.pub.Publish(context.Background(), &SiprecEvent{
 		Event:          EventCallEnd,
+		Timestamp:      endTimeISO,
 		SIPCallID:      callID,
 		From:           sess.From,
 		To:             sess.To,

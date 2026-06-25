@@ -21,6 +21,11 @@ type recSession struct {
 	// Legs holds the two media recorders, keyed by label (e.g. "inbound"/"outbound").
 	Legs []*rtpRecorder
 
+	// StartTime is the ISO 8601 timestamp captured when the INVITE arrived.
+	// It is used as the Timestamp on published events so it matches the
+	// Unix-millisecond component embedded in the recording file names.
+	StartTime string
+
 	CreatedAt time.Time
 
 	mu     sync.Mutex
