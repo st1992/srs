@@ -52,6 +52,7 @@ data:
     loadmodule "maxfwd.so"
     loadmodule "xlog.so"
     loadmodule "sanity.so"
+    loadmodule "siputils.so"
     loadmodule "kex.so"
     loadmodule "dispatcher.so"
 
