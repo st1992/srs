@@ -19,9 +19,9 @@
 # ──────────────────────────────────────────────────────────────────────────────
 kamailio:
   image:
-    repository: ghcr.io/kamailio/kamailio
-    tag: "6.0.7-bookworm"
-    pullPolicy: IfNotPresent
+    repository: us-central1-docker.pkg.dev/div-deai-cx-dev-usc1-ri/cx-sip/cx-streamlink-proxy
+    tag: "dev"
+    pullPolicy: Always
 
   # Pin to the dedicated Kamailio node.
   nodeSelector:
@@ -85,9 +85,8 @@ kamailio:
 # ──────────────────────────────────────────────────────────────────────────────
 siprecRecorder:
   image:
-    # Replace with your registry/image after building from the repo Dockerfile.
-    repository: your-registry/siprec-recorder
-    tag: "latest"
+    repository: us-central1-docker.pkg.dev/div-deai-cx-dev-usc1-ri/cx-sip/cx-streamlink-rec
+    tag: "dev"
     pullPolicy: Always
 
   nodeSelector:
