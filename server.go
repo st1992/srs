@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
+	"sync/atomic"
 	"path/filepath"
 	"time"
 
@@ -33,6 +35,15 @@ type recorderServer struct {
 	// through the proxy or get 404'd by the receiving sipgo mux.
 	sipContactHost string
 	sipContactPort int
+
+	// healthSrv exposes GET /healthz for Kubernetes probes and the GCP
+	// Internal NLB health check that fronts the RTP media path. ready is
+	// flipped to 1 once the SIP UDP socket is bound, mirroring the way
+	// kube-proxy's auto-generated healthCheckNodePort only returns 200
+	// when a local backend is actually serving traffic.
+	healthSrv      *http.Server
+	healthListener net.Listener
+	ready          atomic.Bool
 }
 
 // NewServer constructs the SIP server, registers handlers, and prepares the
@@ -114,11 +125,54 @@ func (s *recorderServer) Start() error {
 			s.log.Error("SIP UDP serve error", "err", err)
 		}
 	}()
+
+	if err := s.startHealthServer(); err != nil {
+		return fmt.Errorf("failed to start health server: %w", err)
+	}
+	s.ready.Store(true)
+	return nil
+}
+
+// startHealthServer brings up the HTTP /healthz endpoint used by Kubernetes
+// probes and the GCP Internal NLB health check fronting the RTP media path.
+// A no-op when HealthListenAddr is empty.
+func (s *recorderServer) startHealthServer() error {
+	addr := s.cfg.HealthListenAddr
+	if addr == "" {
+		return nil
+	}
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %q: %w", addr, err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		if !s.ready.Load() {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	s.healthListener = lis
+	s.healthSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := s.healthSrv.Serve(lis); err != nil && err != http.ErrServerClosed {
+			s.log.Error("health server error", "err", err)
+		}
+	}()
+	s.log.Info("health server listening", "addr", addr, "path", "/healthz")
 	return nil
 }
 
 // Stop closes the SIP listener, finalizes all recordings, and drains uploads.
 func (s *recorderServer) Stop() {
+	s.ready.Store(false)
+	if s.healthSrv != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = s.healthSrv.Shutdown(shutdownCtx)
+		cancel()
+	}
 	if s.srv != nil {
 		_ = s.srv.Close()
 	}

@@ -15,6 +15,10 @@ data:
     # the pod inherits all of the node's network interfaces.
     sip_listen_addr: "{{ .Values.siprecRecorder.config.sipListenAddr }}"
 
+    # HTTP /healthz endpoint. Probed by Kubernetes liveness/readiness and by
+    # the GCP Internal NLB health check fronting the RTP media path.
+    health_listen_addr: "{{ .Values.siprecRecorder.config.healthListenAddr }}"
+
     # Public IP advertised in SDP answers for RTP media.
     # Empty → auto-detect the node's primary non-loopback IPv4 address at startup.
     # With hostNetwork=true this correctly resolves to the physical node IP.

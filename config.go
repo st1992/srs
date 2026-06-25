@@ -12,6 +12,12 @@ type Config struct {
 	// SIPListenAddr is the address the SIP server listens on (UDP), e.g. "0.0.0.0:5060".
 	SIPListenAddr string `yaml:"sip_listen_addr"`
 
+	// HealthListenAddr is the address the HTTP health-check server listens on,
+	// e.g. "0.0.0.0:8080". Exposes GET /healthz returning 200 OK once the SIP
+	// listener is up. Probed by Kubernetes liveness/readiness and by the GCP
+	// Internal NLB health check that fronts the RTP media path.
+	HealthListenAddr string `yaml:"health_listen_addr"`
+
 	// MediaIP is the IP address advertised in SDP answers for RTP media.
 	// If empty, the recorder attempts to detect a non-loopback IPv4 address.
 	MediaIP string `yaml:"media_ip"`
@@ -67,6 +73,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		SIPListenAddr:            "0.0.0.0:5060",
+		HealthListenAddr:         "0.0.0.0:8080",
 		RTPPortStart:             10000,
 		RTPPortEnd:               11000,
 		RecordingDir:             ".",
