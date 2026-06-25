@@ -486,7 +486,20 @@ func splitHostPort(addr string) (string, int, error) {
 	return host, port, nil
 }
 
-// detectMediaIP picks the first non-loopback IPv4 address on the host.
+// detectMediaIP picks the first globally-routable IPv4 address on the host.
+//
+// We MUST skip:
+//   - loopback (127.0.0.0/8)             — never routable off-host.
+//   - link-local (169.254.0.0/16)        — on GCE this is the metadata
+//     server alias and is NOT routable across the VPC. If we advertise it
+//     as our Contact, upstream proxies will dutifully forward in-dialog
+//     ACK/BYE there and the packet will dead-end on the source host.
+//   - unspecified (0.0.0.0)              — invalid as a Contact.
+//   - multicast / broadcast              — invalid as a Contact.
+//
+// With hostNetwork: true on GKE the surviving interface is the node's
+// primary VPC IP (e.g. 10.x / 100.x), which is exactly what we want
+// upstream SBCs and proxies to use for in-dialog routing.
 func detectMediaIP() (string, error) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
@@ -494,12 +507,19 @@ func detectMediaIP() (string, error) {
 	}
 	for _, addr := range addrs {
 		ipNet, ok := addr.(*net.IPNet)
-		if !ok || ipNet.IP.IsLoopback() {
+		if !ok {
 			continue
 		}
-		if ip4 := ipNet.IP.To4(); ip4 != nil {
-			return ip4.String(), nil
+		ip := ipNet.IP
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+			ip.IsUnspecified() || ip.IsMulticast() {
+			continue
 		}
+		ip4 := ip.To4()
+		if ip4 == nil {
+			continue
+		}
+		return ip4.String(), nil
 	}
-	return "", fmt.Errorf("no non-loopback IPv4 address found")
+	return "", fmt.Errorf("no routable non-loopback IPv4 address found")
 }
