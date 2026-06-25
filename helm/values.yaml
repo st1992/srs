@@ -173,7 +173,7 @@ siprecRecorder:
 
     # Leave empty — the recorder auto-detects the node's non-loopback IPv4
     # address, which is correct when hostNetwork: true is set.
-    mediaIP: "100.73.16.68"
+    mediaIP: "100.73.16.5"
 
     # RTP port range.  Each concurrent SIPREC session consumes 2 UDP ports
     # (one per audio leg).  10000–30000 = 20 000 ports = up to 10 000 sessions,
