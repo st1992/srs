@@ -33,16 +33,15 @@ kamailio:
       value: kamailio
       effect: NoSchedule
 
-  # c2-standard-4: 4 vCPU / 16 GiB
-  # Request most of the node; limit at node capacity so Kamailio can burst.
-  # ~500m CPU and ~2Gi left for kube-system DaemonSets (kube-proxy, fluentd …).
+  # Node allocatable: 3920m CPU / ~12.96 GiB (13591716Ki).
+  # Leave ~420m CPU and ~1.96Gi for kube-system DaemonSets (kube-proxy, fluentd …).
   resources:
     requests:
       cpu: "3500m"
-      memory: "12Gi"
+      memory: "11Gi"
     limits:
-      cpu: "4"
-      memory: "14Gi"
+      cpu: "3920m"
+      memory: "12500Mi"
 
   # Kamailio module path inside the container image.
   #   Debian x86_64 : /usr/lib/x86_64-linux-gnu/kamailio/modules/
@@ -98,21 +97,17 @@ siprecRecorder:
       value: recorder
       effect: NoSchedule
 
-  # ── Resource claim — c2-standard-4 (4 vCPU / 16 GiB) ──────────────────────
-  # requests  ≈ allocatable minus system overhead so the scheduler treats the
-  #             node as fully committed and places no competing pods.
-  # limits    = full node capacity; the recorder may burst to use everything.
-  #
-  # GKE reserves on c2-standard-4 (approximate):
-  #   CPU    : 60m  → allocatable ≈ 3940m
-  #   Memory : ~2Gi → allocatable ≈ 13.8Gi  (kubelet + eviction threshold)
+  # ── Resource claim ──────────────────────────────────────────────────────────
+  # Node allocatable: 3920m CPU / ~12.96 GiB (13591716Ki).
+  # requests  — reserves enough to prevent competing pods from landing here.
+  # limits    — capped just below allocatable so the pod is always schedulable.
   resources:
     requests:
-      cpu: "3800m"
-      memory: "13Gi"
+      cpu: "3700m"
+      memory: "12Gi"
     limits:
-      cpu: "4"
-      memory: "15Gi"
+      cpu: "3920m"
+      memory: "12500Mi"
 
   updateStrategy:
     type: RollingUpdate
