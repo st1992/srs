@@ -159,7 +159,7 @@ siprecRecorder:
     # Workload Identity — GCP IAM Service Account email to bind to the pod's KSA.
     # Mutually exclusive with credentialsSecret; leave empty when using Option B.
     workloadIdentity:
-      gcpServiceAccount: ""  # e.g. siprec-recorder@my-project.iam.gserviceaccount.com
+      gcpServiceAccount: "adtgcp-css-dev-insight-sa@adtgcp-cnt-dev-css-tlcm-fe10.iam.gserviceaccount.com"
 
     # JSON key Secret — name of a Kubernetes Secret containing the key file.
     # Mutually exclusive with workloadIdentity; leave empty when using Option A.
