@@ -46,7 +46,6 @@ data:
 
     loadmodule "sl.so"
     loadmodule "tm.so"
-    loadmodule "tmx.so"
     loadmodule "rr.so"
     loadmodule "pv.so"
     loadmodule "maxfwd.so"
@@ -84,11 +83,6 @@ data:
     ####### Routing Logic ########
 
     request_route {
-        # ── Retransmission de-dup ──────────────────────────────────────────
-        if (t_precheck_trans()) {
-            t_check_trans();
-            exit;
-        }
         t_check_trans();
 
         # ── Max-Forwards guard ────────────────────────────────────────────
