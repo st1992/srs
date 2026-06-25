@@ -47,8 +47,12 @@ data:
 
     # With hostNetwork=true the pod inherits the node's interfaces;
     # 0.0.0.0 binds on every address present on the node.
-    listen=udp:0.0.0.0:5060
-    listen=tcp:0.0.0.0:5060
+    # Bind on all node interfaces but advertise a single, stable address in
+    # Via / Record-Route / Contact so upstream SBCs always route in-dialog
+    # traffic back to the LoadBalancer VIP regardless of which node IP the
+    # kernel picks as source.
+    listen=udp:0.0.0.0:5060 advertise {{ .Values.kamailio.advertiseAddress }}:5060
+    listen=tcp:0.0.0.0:5060 advertise {{ .Values.kamailio.advertiseAddress }}:5060
 
     ####### Modules ########
 

@@ -48,6 +48,13 @@ kamailio:
   #   Debian arm64  : /usr/lib/aarch64-linux-gnu/kamailio/modules/
   modulePath: "/usr/lib/x86_64-linux-gnu/kamailio/modules/"
 
+  # Address advertised in Via / Record-Route / Contact headers. Should be the
+  # stable IP that upstream SBCs use to reach this proxy — typically the
+  # Internal LoadBalancer VIP fronting the Kamailio Service. Without this,
+  # Kamailio puts the node's primary interface IP in those headers, which
+  # breaks in-dialog routing when the LB VIP differs from the node IP.
+  advertiseAddress: "100.73.16.5"
+
   # Worker processes per listen socket.
   # c2-standard-4 has 4 vCPUs; 2× gives 8 workers, which keeps all cores busy
   # under bursty SIP traffic without excessive context-switch overhead.
