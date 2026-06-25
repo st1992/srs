@@ -108,11 +108,6 @@ kamailio:
 #   kubectl get node <recorder-node> -o jsonpath='{.status.allocatable}'
 # ──────────────────────────────────────────────────────────────────────────────
 siprecRecorder:
-  # TCP port the recorder's /healthz endpoint binds on the host network.
-  # Used by Kubernetes probes and as the target port of the GCP Internal
-  # NLB health check provisioned by helm/scripts/setup-media-lb.sh.
-  healthPort: 8080
-
   image:
     repository: us-central1-docker.pkg.dev/div-deai-cx-dev-usc1-ri/cx-sip/cx-streamlink-rec
     tag: "dev"
@@ -200,12 +195,6 @@ siprecRecorder:
   # ── Recorder config (rendered into /app/config.yaml inside the pod) ────────
   config:
     sipListenAddr: "0.0.0.0:5060"
-
-    # HTTP /healthz endpoint exposed by the recorder. Probed by Kubernetes
-    # liveness/readiness AND by the GCP Internal NLB health check that
-    # fronts the RTP media path (see helm/scripts/setup-media-lb.sh). The
-    # port must match siprecRecorder.healthPort below.
-    healthListenAddr: "0.0.0.0:8080"
 
     # Address stamped into the SDP "c=" line of the 200 OK answer — i.e. the
     # IP the SBC will send RTP to. We deliberately advertise the shared

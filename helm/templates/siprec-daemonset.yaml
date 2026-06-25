@@ -100,16 +100,6 @@ spec:
               hostPort: 5060
               protocol: UDP
 
-            # HTTP /healthz endpoint. Exposed on the node IP via hostPort so
-            # the GCP Internal NLB health check (created by setup-media-lb.sh)
-            # can probe it, mirroring how kube-proxy's auto-generated
-            # healthCheckNodePort makes the Kamailio NLB consider its nodes
-            # healthy.
-            - name: health
-              containerPort: {{ .Values.siprecRecorder.healthPort }}
-              hostPort: {{ .Values.siprecRecorder.healthPort }}
-              protocol: TCP
-
             # RTP range — declared here for documentation; Kubernetes does not
             # map large ranges in Service objects, but with hostNetwork=true
             # the ports are directly accessible on the node IP.
@@ -119,22 +109,25 @@ spec:
               protocol: UDP
 
           # ── Health probes ──────────────────────────────────────────────────
-          # HTTP /healthz returns 200 once the SIP UDP socket is bound. The
-          # same endpoint is probed by the GCP Internal NLB fronting the RTP
-          # media path.
+          # Uses only POSIX tools available in the minimal Alpine image;
+          # matches the HEALTHCHECK defined in the Dockerfile.
           livenessProbe:
-            httpGet:
-              path: /healthz
-              port: {{ .Values.siprecRecorder.healthPort }}
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "kill -0 1 && grep -q siprec-recorder /proc/1/cmdline"
             initialDelaySeconds: 10
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
 
           readinessProbe:
-            httpGet:
-              path: /healthz
-              port: {{ .Values.siprecRecorder.healthPort }}
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "kill -0 1 && grep -q siprec-recorder /proc/1/cmdline"
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3
