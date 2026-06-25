@@ -44,8 +44,8 @@ data:
 
     mpath="{{ .Values.kamailio.modulePath }}"
 
-    loadmodule "sl.so"
     loadmodule "tm.so"
+    loadmodule "sl.so"
     loadmodule "rr.so"
     loadmodule "pv.so"
     loadmodule "maxfwd.so"
