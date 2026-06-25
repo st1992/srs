@@ -15,9 +15,10 @@ metadata:
     {{- end }}
 spec:
   type: {{ .Values.kamailio.service.type }}
-  # Mixed-protocol (UDP + TCP) on a single LoadBalancer is supported on GKE
-  # 1.24+ (MixedProtocolLBService is GA since 1.26).  One internal IP serves
-  # both transports.
+  # GKE's Internal Passthrough NLB only supports one protocol per forwarding
+  # rule.  SIPREC traffic is UDP, so we expose only UDP through the LB.
+  # The pod still listens on TCP/5060 via hostNetwork for any in-cluster
+  # or node-local callers that need it.
   {{- if or (eq .Values.kamailio.service.type "LoadBalancer") (eq .Values.kamailio.service.type "NodePort") }}
   # Preserve the real SBC source IP and skip the extra kube-proxy hop.
   externalTrafficPolicy: Local
@@ -29,7 +30,3 @@ spec:
       port: {{ .Values.kamailio.service.port }}
       targetPort: sip-udp
       protocol: UDP
-    - name: sip-tcp
-      port: {{ .Values.kamailio.service.port }}
-      targetPort: sip-tcp
-      protocol: TCP
