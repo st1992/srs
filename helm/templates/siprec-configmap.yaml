@@ -31,9 +31,14 @@ data:
     # so recordings survive pod restarts.
     recording_dir: "{{ .Values.siprecRecorder.config.recordingDir }}"
 
-    # Optional path to a GCP service-account JSON key.
-    # Leave empty to use Workload Identity (recommended for GKE).
-    gcp_credentials_file: "{{ .Values.siprecRecorder.config.gcpCredentialsFile }}"
+    # GCP credentials file path.
+    # Option A (Workload Identity): leave empty — ADC picks up WI automatically.
+    # Option B (JSON key Secret):   auto-populated from the mounted Secret path.
+    {{- if .Values.siprecRecorder.gcp.credentialsSecret.name }}
+    gcp_credentials_file: "/var/secrets/google/{{ .Values.siprecRecorder.gcp.credentialsSecret.key }}"
+    {{- else }}
+    gcp_credentials_file: ""
+    {{- end }}
 
     # GCS — audio recordings (leave gcs_bucket empty to keep on local disk only).
     gcs_bucket:        "{{ .Values.siprecRecorder.config.gcsBucket }}"

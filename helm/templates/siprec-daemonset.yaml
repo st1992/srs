@@ -37,6 +37,11 @@ spec:
       tolerations:
         {{- toYaml .Values.siprecRecorder.tolerations | nindent 8 }}
 
+      # ── GCP identity ──────────────────────────────────────────────────────
+      # The ServiceAccount provides Workload Identity (Option A) or is simply
+      # required when mounting a credentials Secret (Option B).
+      serviceAccountName: {{ include "siprec.serviceAccountName" . }}
+
       # ── Host network ──────────────────────────────────────────────────────
       # RTP media is sent directly to/from the node's IP without any NAT or
       # port-mapping overhead.  SIP signalling from Kamailio also targets the
@@ -119,6 +124,12 @@ spec:
             # recordings survive pod restarts and can be re-uploaded on next start.
             - name: recordings
               mountPath: /app/recordings
+            {{- if .Values.siprecRecorder.gcp.credentialsSecret.name }}
+            # Option B: JSON key mounted from a Kubernetes Secret.
+            - name: gcp-credentials
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- end }}
 
       volumes:
         - name: siprec-config
@@ -129,3 +140,10 @@ spec:
             # Created automatically by the kubelet if it does not exist.
             path: {{ .Values.siprecRecorder.recordingsHostPath }}
             type: DirectoryOrCreate
+        {{- if .Values.siprecRecorder.gcp.credentialsSecret.name }}
+        # Option B: Secret volume — created separately by the operator:
+        #   kubectl create secret generic <name> --from-file=key.json=./sa-key.json
+        - name: gcp-credentials
+          secret:
+            secretName: {{ .Values.siprecRecorder.gcp.credentialsSecret.name }}
+        {{- end }}

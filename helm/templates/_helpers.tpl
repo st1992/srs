@@ -70,3 +70,10 @@ recorder pod IPs.
 {{- define "siprec.headlessServiceName" -}}
 {{- printf "%s-siprec-recorder-headless" .Release.Name | trunc 63 | trimSuffix "-" }}
 {{- end }}
+
+{{/*
+Name of the Kubernetes ServiceAccount used by the SIPREC recorder pods.
+*/}}
+{{- define "siprec.serviceAccountName" -}}
+{{- printf "%s-siprec-recorder" .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- end }}

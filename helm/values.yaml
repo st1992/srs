@@ -123,6 +123,55 @@ siprecRecorder:
   # The directory is created automatically (type: DirectoryOrCreate).
   recordingsHostPath: /var/lib/siprec/recordings
 
+  # ── GCP authentication ────────────────────────────────────────────────────
+  #
+  # Option A — Workload Identity (recommended for GKE, no secrets required)
+  # -------------------------------------------------------------------------
+  # 1. Create a GCP IAM Service Account (GSA) and grant it Storage Object
+  #    Creator on both GCS buckets:
+  #      gcloud iam service-accounts create siprec-recorder \
+  #        --project=YOUR_PROJECT
+  #      gcloud projects add-iam-policy-binding YOUR_PROJECT \
+  #        --member="serviceAccount:siprec-recorder@YOUR_PROJECT.iam.gserviceaccount.com" \
+  #        --role="roles/storage.objectCreator"
+  #
+  # 2. Bind the GSA to the Kubernetes ServiceAccount (KSA) that this chart
+  #    creates (name = release-name + "-siprec-recorder"):
+  #      gcloud iam service-accounts add-iam-policy-binding \
+  #        siprec-recorder@YOUR_PROJECT.iam.gserviceaccount.com \
+  #        --role="roles/iam.workloadIdentityUser" \
+  #        --member="serviceAccount:YOUR_PROJECT.svc.id.goog[NAMESPACE/RELEASE-siprec-recorder]"
+  #
+  # 3. Enable Workload Identity on the GKE node pool if not already enabled.
+  #
+  # 4. Set workloadIdentity.gcpServiceAccount below; leave credentialsSecret
+  #    empty.
+  #
+  # Option B — Service-account JSON key (no Workload Identity needed)
+  # -------------------------------------------------------------------------
+  # 1. Create and download a JSON key for the GSA:
+  #      gcloud iam service-accounts keys create sa-key.json \
+  #        --iam-account=siprec-recorder@YOUR_PROJECT.iam.gserviceaccount.com
+  #
+  # 2. Store it as a Kubernetes Secret:
+  #      kubectl create secret generic siprec-gcp-credentials \
+  #        --namespace=YOUR_NAMESPACE \
+  #        --from-file=key.json=./sa-key.json
+  #
+  # 3. Set credentialsSecret.name below; leave workloadIdentity empty.
+  #
+  gcp:
+    # Workload Identity — GCP IAM Service Account email to bind to the pod's KSA.
+    # Mutually exclusive with credentialsSecret; leave empty when using Option B.
+    workloadIdentity:
+      gcpServiceAccount: ""  # e.g. siprec-recorder@my-project.iam.gserviceaccount.com
+
+    # JSON key Secret — name of a Kubernetes Secret containing the key file.
+    # Mutually exclusive with workloadIdentity; leave empty when using Option A.
+    credentialsSecret:
+      name: ""        # e.g. siprec-gcp-credentials
+      key: "key.json" # key inside the Secret that holds the JSON content
+
   # ── Recorder config (rendered into /app/config.yaml inside the pod) ────────
   config:
     sipListenAddr: "0.0.0.0:5060"
@@ -139,15 +188,12 @@ siprecRecorder:
 
     recordingDir: "/app/recordings"
 
-    # GCP service-account key file (leave empty for Workload Identity)
-    gcpCredentialsFile: ""
-
     # GCS — audio recordings (leave gcsBucket empty to keep on local disk only)
-    gcsBucket: ""
+    gcsBucket: "cx-siprec-audio-raw"
     gcsObjectPrefix: "recordings"
 
     # GCS — per-call metadata JSON files (separate bucket from recordings)
-    gcsMetadataBucket: ""
+    gcsMetadataBucket: "cx-siprec-metadata"
     gcsMetadataObjectPrefix: "metadata"
 
     deleteAfterUpload: true
