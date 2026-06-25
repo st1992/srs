@@ -137,6 +137,11 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 
 	log.Info("processing SIPREC INVITE")
 
+	// Capture call metadata used for file naming.
+	startTimeMs := time.Now().UnixMilli()
+	dnis := toURI(req)
+	ani := fromURI(req)
+
 	// 100 Trying
 	s.respond(tx, req, sip.StatusTrying, "Trying", nil)
 
@@ -198,7 +203,7 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 		}
 		port := conn.LocalAddr().(*net.UDPAddr).Port
 
-		rec, err := newRTPRecorder(conn, s.cfg.RecordingDir, callID, label, pcmuPT, log)
+		rec, err := newRTPRecorder(conn, s.cfg.RecordingDir, callID, dnis, ani, startTimeMs, label, pcmuPT, log)
 		if err != nil {
 			log.Error("failed to create recorder", "err", err)
 			_ = conn.Close()

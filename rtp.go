@@ -30,8 +30,15 @@ type rtpRecorder struct {
 }
 
 // newRTPRecorder creates and opens the .ulaw output file for a leg.
-func newRTPRecorder(conn *net.UDPConn, recordingDir, callID, label string, pcmuPT uint8, log *slog.Logger) (*rtpRecorder, error) {
-	name := fmt.Sprintf("%s_%s.ulaw", sanitizeFileComponent(callID), sanitizeFileComponent(label))
+// The filename format is: {callID}_{dnis}_{ani}_{startTimeMs}_{label}.ulaw
+func newRTPRecorder(conn *net.UDPConn, recordingDir, callID, dnis, ani string, startTimeMs int64, label string, pcmuPT uint8, log *slog.Logger) (*rtpRecorder, error) {
+	name := fmt.Sprintf("%s_%s_%s_%d_%s.ulaw",
+		sanitizeFileComponent(callID),
+		sanitizeFileComponent(dnis),
+		sanitizeFileComponent(ani),
+		startTimeMs,
+		sanitizeFileComponent(label),
+	)
 	path := filepath.Join(recordingDir, name)
 
 	f, err := os.Create(path)

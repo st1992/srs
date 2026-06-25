@@ -43,7 +43,7 @@ func TestRTPRecorder_WritesOnlyPCMUPayload(t *testing.T) {
 	serverAddr := srvConn.LocalAddr().(*net.UDPAddr)
 
 	const pcmuPT = uint8(0)
-	rec, err := newRTPRecorder(srvConn, dir, "callX", "inbound", pcmuPT, testLogger())
+	rec, err := newRTPRecorder(srvConn, dir, "callX", "15551234567", "15559876543", time.Now().UnixMilli(), "inbound", pcmuPT, testLogger())
 	require.NoError(t, err)
 
 	go rec.run()
@@ -75,14 +75,19 @@ func TestRTPRecorder_FileNaming(t *testing.T) {
 	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	require.NoError(t, err)
 
-	rec, err := newRTPRecorder(srvConn, dir, "call/with:weird@chars", "in bound", 0, testLogger())
+	const startMs = int64(1750000000000)
+	rec, err := newRTPRecorder(srvConn, dir, "call/with:weird@chars", "dnis/test", "ani@test", startMs, "in bound", 0, testLogger())
 	require.NoError(t, err)
 
 	// Start the read loop so Close() can unblock cleanly on done.
 	go rec.run()
 	defer rec.Close()
 
-	assert.Contains(t, rec.Path(), "call_with_weird_chars_in_bound.ulaw")
+	assert.Contains(t, rec.Path(), "call_with_weird_chars")
+	assert.Contains(t, rec.Path(), "dnis_test")
+	assert.Contains(t, rec.Path(), "ani_test")
+	assert.Contains(t, rec.Path(), "1750000000000")
+	assert.Contains(t, rec.Path(), "in_bound.ulaw")
 }
 
 func TestPortAllocator_DistinctPortsInRange(t *testing.T) {
