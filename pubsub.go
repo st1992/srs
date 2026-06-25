@@ -27,6 +27,9 @@ type SiprecEvent struct {
 	SourceIP       string            `json:"source_ip,omitempty"`
 	RecordingFiles map[string]string `json:"recording_files,omitempty"`
 	SiprecMetadata *SiprecMetadata   `json:"siprec_metadata,omitempty"`
+	// ByeMetadata carries the rs-metadata from the BYE body (call_end events only).
+	// It typically contains disassociate-time for participants.
+	ByeMetadata    *SiprecMetadata   `json:"bye_metadata,omitempty"`
 	SIPHeaders     map[string]string `json:"sip_headers,omitempty"`
 	Reason         string            `json:"reason,omitempty"`
 }

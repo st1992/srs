@@ -95,6 +95,27 @@ func TestExtractSiprecMetadata(t *testing.T) {
 	assert.Contains(t, meta, "<datamode>complete</datamode>")
 }
 
+func TestExtractSiprecMetadata_DirectBody(t *testing.T) {
+	// BYE messages carry the metadata directly (not multipart).
+	req := sip.NewRequest(sip.BYE, sip.Uri{User: "SIPREC-SRS", Host: "100.73.16.5"})
+	ct := sip.ContentTypeHeader("application/rs-metadata+xml")
+	req.AppendHeader(&ct)
+	req.SetBody([]byte(testSonusByeMetadata))
+
+	raw, err := ExtractSiprecMetadata(req)
+	require.NoError(t, err)
+	assert.Contains(t, raw, "<recording")
+	assert.Contains(t, raw, "<datamode>Partial</datamode>")
+	assert.Contains(t, raw, "disassociate-time")
+
+	// Confirm the raw XML round-trips through the parser.
+	parsed, err := ParseSiprecMetadata(raw)
+	require.NoError(t, err)
+	assert.Equal(t, "Partial", parsed.DataMode)
+	require.Len(t, parsed.Participants, 2)
+	assert.Equal(t, "2026-06-25T04:58:15Z", parsed.Participants[0].DisassociateTime)
+}
+
 // =============================================================================
 // Response Creation Tests
 // =============================================================================

@@ -285,10 +285,21 @@ func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTr
 		return
 	}
 
+	// Parse rs-metadata from the BYE body (best effort; carries disassociate-time).
+	var byeMeta *SiprecMetadata
+	if rawMeta, mErr := ExtractSiprecMetadata(req); mErr == nil {
+		if parsed, pErr := ParseSiprecMetadata(rawMeta); pErr == nil {
+			byeMeta = parsed
+		} else {
+			s.log.Warn("failed to parse BYE SIPREC metadata", "err", pErr, "sipCallID", callID)
+		}
+	}
+
 	s.log.Info("received BYE for SIPREC session",
 		"sipCallID", callID,
 		"sip_headers", sess.Headers,
 		"siprec_metadata", sess.Metadata,
+		"bye_metadata", byeMeta,
 	)
 	sess.Close()
 
@@ -305,6 +316,7 @@ func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTr
 		SourceIP:       sess.SourceIP,
 		RecordingFiles: sess.RecordingFiles(),
 		SiprecMetadata: sess.Metadata,
+		ByeMetadata:    byeMeta,
 		SIPHeaders:     sess.Headers,
 		Reason:         "bye",
 	})

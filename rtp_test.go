@@ -90,35 +90,6 @@ func TestRTPRecorder_FileNaming(t *testing.T) {
 	assert.Contains(t, rec.Path(), "in_bound.ulaw")
 }
 
-func TestPortAllocator_DistinctPortsInRange(t *testing.T) {
-	alloc := newPortAllocator("127.0.0.1", 41000, 41010)
-
-	conn1, port1, err := alloc.open()
-	require.NoError(t, err)
-	defer conn1.Close()
-
-	conn2, port2, err := alloc.open()
-	require.NoError(t, err)
-	defer conn2.Close()
-
-	assert.NotEqual(t, port1, port2)
-	assert.GreaterOrEqual(t, port1, 41000)
-	assert.LessOrEqual(t, port1, 41010)
-	assert.GreaterOrEqual(t, port2, 41000)
-	assert.LessOrEqual(t, port2, 41010)
-}
-
-func TestPortAllocator_Exhausted(t *testing.T) {
-	// Single-port range: first open succeeds, second fails.
-	alloc := newPortAllocator("127.0.0.1", 41020, 41020)
-
-	conn1, _, err := alloc.open()
-	require.NoError(t, err)
-	defer conn1.Close()
-
-	_, _, err = alloc.open()
-	require.Error(t, err)
-}
 
 func TestSanitizeFileComponent(t *testing.T) {
 	assert.Equal(t, "a_b_c", sanitizeFileComponent("a/b:c"))

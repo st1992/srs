@@ -105,8 +105,9 @@ func extractSDPFromMultipart(contentType string, body []byte) (string, error) {
 	return "", fmt.Errorf("no application/sdp part found in multipart body")
 }
 
-// ExtractSiprecMetadata extracts the rs-metadata XML from a SIPREC multipart body.
-// This contains participant information, session IDs, and stream associations.
+// ExtractSiprecMetadata extracts the rs-metadata XML from a SIPREC request body.
+// The body may be either multipart/mixed (INVITE) or a bare application/rs-metadata+xml
+// (BYE). Both forms are handled.
 func ExtractSiprecMetadata(req *sip.Request) (string, error) {
 	body := req.Body()
 	if len(body) == 0 {
@@ -119,11 +120,23 @@ func ExtractSiprecMetadata(req *sip.Request) (string, error) {
 	}
 
 	ct := contentType.Value()
-	if !strings.HasPrefix(ct, "multipart/") {
-		return "", fmt.Errorf("not a multipart body")
+
+	// BYE (and some UPDATE) messages carry the metadata directly.
+	if strings.Contains(ct, "rs-metadata") || strings.Contains(ct, "recording-session") {
+		return string(body), nil
 	}
 
-	mediaType, params, err := mime.ParseMediaType(ct)
+	if !strings.HasPrefix(ct, "multipart/") {
+		return "", fmt.Errorf("not a multipart or rs-metadata body")
+	}
+
+	return extractMetadataFromMultipart(ct, body)
+}
+
+// extractMetadataFromMultipart parses a multipart MIME body and extracts the
+// rs-metadata part.
+func extractMetadataFromMultipart(contentType string, body []byte) (string, error) {
+	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse Content-Type: %w", err)
 	}
