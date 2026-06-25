@@ -54,6 +54,15 @@ data:
     listen=udp:0.0.0.0:5060 advertise {{ .Values.kamailio.advertiseAddress }}:5060
     listen=tcp:0.0.0.0:5060 advertise {{ .Values.kamailio.advertiseAddress }}:5060
 
+    # CRITICAL: pair `advertise` with `alias` so the advertise address is
+    # recognised as "myself". Without this, in-dialog ACK/BYE arriving with
+    # Route: <sip:<advertise>;lr> are not popped by loose_route() (because
+    # the bound address is 0.0.0.0, not the advertise IP), and the proxy
+    # forwards them right back to itself — producing an ACK loop that
+    # appends a new Via on every hop until max-forwards expires.
+    alias=udp:{{ .Values.kamailio.advertiseAddress }}:5060
+    alias=tcp:{{ .Values.kamailio.advertiseAddress }}:5060
+
     ####### Modules ########
 
     mpath="{{ .Values.kamailio.modulePath }}"
