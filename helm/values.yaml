@@ -40,8 +40,8 @@ kamailio:
       cpu: "3500m"
       memory: "11Gi"
     limits:
-      cpu: "3920m"
-      memory: "12500Mi"
+      cpu: "3600m"
+      memory: "12000Mi"
 
   # Kamailio module path inside the container image.
   #   Debian x86_64 : /usr/lib/x86_64-linux-gnu/kamailio/modules/
@@ -104,10 +104,10 @@ siprecRecorder:
   resources:
     requests:
       cpu: "3700m"
-      memory: "12Gi"
+      memory: "11Gi"
     limits:
-      cpu: "3920m"
-      memory: "12500Mi"
+      cpu: "3800m"
+      memory: "12000Mi"
 
   updateStrategy:
     type: RollingUpdate
