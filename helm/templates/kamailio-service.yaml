@@ -5,27 +5,30 @@ metadata:
   namespace: {{ include "siprec-stack.namespace" . }}
   labels:
     {{- include "kamailio.labels" . | nindent 4 }}
-  {{- with .Values.kamailio.service.annotations }}
   annotations:
+    # GKE Internal Passthrough Network Load Balancer (L4 / L3 passthrough).
+    # The LB forwards packets unchanged to the backend pods on the same VPC
+    # IP, so the real SBC source IP is preserved.
+    networking.gke.io/load-balancer-type: "Internal"
+    {{- with .Values.kamailio.service.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 spec:
   type: {{ .Values.kamailio.service.type }}
-  # externalTrafficPolicy: Local preserves the real source IP of SIP packets
-  # and avoids an extra hop through kube-proxy on a different node.
-  # Only valid for LoadBalancer / NodePort service types.
+  # Mixed-protocol (UDP + TCP) on a single LoadBalancer is supported on GKE
+  # 1.24+ (MixedProtocolLBService is GA since 1.26).  One internal IP serves
+  # both transports.
   {{- if or (eq .Values.kamailio.service.type "LoadBalancer") (eq .Values.kamailio.service.type "NodePort") }}
+  # Preserve the real SBC source IP and skip the extra kube-proxy hop.
   externalTrafficPolicy: Local
   {{- end }}
   selector:
     {{- include "kamailio.selectorLabels" . | nindent 4 }}
   ports:
-    # SIP signalling — UDP is the primary transport for SIPREC.
     - name: sip-udp
       port: {{ .Values.kamailio.service.port }}
       targetPort: sip-udp
       protocol: UDP
-    # SIP over TCP (required by some SBCs and WebRTC gateways).
     - name: sip-tcp
       port: {{ .Values.kamailio.service.port }}
       targetPort: sip-tcp
