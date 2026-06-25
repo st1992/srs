@@ -54,12 +54,17 @@ data:
     listen=udp:0.0.0.0:5060 advertise {{ .Values.kamailio.advertiseAddress }}:5060
     listen=tcp:0.0.0.0:5060 advertise {{ .Values.kamailio.advertiseAddress }}:5060
 
-    # CRITICAL: pair `advertise` with `alias` so the advertise address is
-    # recognised as "myself". Without this, in-dialog ACK/BYE arriving with
-    # Route: <sip:<advertise>;lr> are not popped by loose_route() (because
-    # the bound address is 0.0.0.0, not the advertise IP), and the proxy
-    # forwards them right back to itself — producing an ACK loop that
-    # appends a new Via on every hop until max-forwards expires.
+    # Global default for Via / Record-Route / Contact in locally-generated
+    # messages (100 Trying, OPTIONS replies, dispatcher pings, error
+    # responses). `listen … advertise` only affects messages routed out
+    # that specific socket; advertised_address covers everything else and
+    # guarantees in-dialog traffic always returns to the LB VIP.
+    advertised_address="{{ .Values.kamailio.advertiseAddress }}"
+    advertised_port=5060
+
+    # Recognise the advertise address as "myself" so loose_route() will pop
+    # Route headers that point at the VIP (bind addr is 0.0.0.0, which
+    # would otherwise fail the myself check).
     alias=udp:{{ .Values.kamailio.advertiseAddress }}:5060
     alias=tcp:{{ .Values.kamailio.advertiseAddress }}:5060
 
@@ -133,14 +138,26 @@ data:
         if (has_totag()) {
             if (loose_route()) {
                 route(RELAY);
-            } else {
-                if (is_method("ACK")) {
-                    # ACK for a non-2xx final response — absorb it
-                    route(RELAY);
-                } else {
-                    sl_send_reply("404", "Not Found");
-                }
+                exit;
             }
+
+            # ACK for a non-2xx final response — only relay it if it
+            # matches an existing transaction. We MUST NOT fall through
+            # to a blind route(RELAY) here: if loose_route() failed it
+            # means there is no Route header to pop, so the RURI is
+            # likely our own advertise address (some SBCs collapse a
+            # single Record-Route into the Request-URI). Forwarding
+            # such an ACK would just send it back to ourselves and
+            # create an infinite loop, accumulating a Via on each pass
+            # until Max-Forwards expires.
+            if (is_method("ACK")) {
+                if (t_check_trans()) {
+                    route(RELAY);
+                }
+                exit;
+            }
+
+            sl_send_reply("404", "Not Found");
             exit;
         }
 
@@ -171,6 +188,15 @@ data:
             sl_send_reply("503", "Service Unavailable — no recorders available");
             exit;
         }
+        # Pin the outbound socket to the advertise address. With
+        # listen=0.0.0.0 the kernel may otherwise pick the node's primary
+        # interface IP as the source, and the recorder would then stamp
+        # that node IP into the dialog's return path — causing the SBC's
+        # in-dialog ACK/BYE to bypass the LB VIP (or to fail the dialog
+        # match on the way back in). The alias= directive above is what
+        # makes this socket selector resolvable even though we don't bind
+        # explicitly on the advertise IP.
+        force_send_socket(udp:{{ .Values.kamailio.advertiseAddress }}:5060);
         xlog("L_INFO", "SIPREC session $ci dispatched to recorder $du\n");
         t_on_failure("RECORDER_FAILOVER");
         route(RELAY);
