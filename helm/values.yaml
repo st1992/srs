@@ -139,16 +139,17 @@ siprecRecorder:
 
     recordingDir: "/app/recordings"
 
-    # GCP Pub/Sub (leave empty to disable)
-    pubsubProjectId: ""
-    pubsubTopicId: ""
-
     # GCP service-account key file (leave empty for Workload Identity)
     gcpCredentialsFile: ""
 
-    # GCS upload (leave gcsBucket empty to keep recordings on local disk only)
+    # GCS — audio recordings (leave gcsBucket empty to keep on local disk only)
     gcsBucket: ""
     gcsObjectPrefix: "recordings"
+
+    # GCS — per-call metadata JSON files (separate bucket from recordings)
+    gcsMetadataBucket: ""
+    gcsMetadataObjectPrefix: "metadata"
+
     deleteAfterUpload: true
 
     uploadWorkers: 4

@@ -31,17 +31,17 @@ data:
     # so recordings survive pod restarts.
     recording_dir: "{{ .Values.siprecRecorder.config.recordingDir }}"
 
-    # GCP Pub/Sub — leave empty to disable event publishing.
-    pubsub_project_id: "{{ .Values.siprecRecorder.config.pubsubProjectId }}"
-    pubsub_topic_id:   "{{ .Values.siprecRecorder.config.pubsubTopicId }}"
-
     # Optional path to a GCP service-account JSON key.
     # Leave empty to use Workload Identity (recommended for GKE).
     gcp_credentials_file: "{{ .Values.siprecRecorder.config.gcpCredentialsFile }}"
 
-    # Google Cloud Storage — leave gcs_bucket empty to keep files on local disk only.
+    # GCS — audio recordings (leave gcs_bucket empty to keep on local disk only).
     gcs_bucket:        "{{ .Values.siprecRecorder.config.gcsBucket }}"
     gcs_object_prefix: "{{ .Values.siprecRecorder.config.gcsObjectPrefix }}"
+
+    # GCS — per-call metadata JSON files (separate bucket from recordings).
+    gcs_metadata_bucket:        "{{ .Values.siprecRecorder.config.gcsMetadataBucket }}"
+    gcs_metadata_object_prefix: "{{ .Values.siprecRecorder.config.gcsMetadataObjectPrefix }}"
 
     # Remove local file only after a confirmed successful GCS upload.
     delete_after_upload: {{ .Values.siprecRecorder.config.deleteAfterUpload }}

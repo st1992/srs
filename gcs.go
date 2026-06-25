@@ -40,16 +40,17 @@ func (n *noopUploader) Enqueue(p string)         { n.log.Debug("GCS upload disab
 func (n *noopUploader) Sweep()                   {}
 func (n *noopUploader) Shutdown(context.Context) {}
 
-// gcsUploader uploads .ulaw recordings to a GCS bucket with retries and
-// deletes the local copy only after a confirmed successful upload.
+// gcsUploader uploads files to a GCS bucket with retries and deletes the local
+// copy only after a confirmed successful upload.
 type gcsUploader struct {
-	client      *storage.Client
-	bucket      string
-	prefix      string
-	dir         string
-	deleteAfter bool
-	maxRetries  int
-	log         *slog.Logger
+	client        *storage.Client
+	bucket        string
+	prefix        string
+	dir           string
+	deleteAfter   bool
+	maxRetries    int
+	sweepPatterns []string // glob patterns swept for orphaned files (e.g. ["*.ulaw"])
+	log           *slog.Logger
 
 	queue  chan string
 	wg     sync.WaitGroup
@@ -63,14 +64,30 @@ type gcsUploader struct {
 	draining bool
 }
 
-// NewUploader builds an Uploader. If cfg.GCSBucket is empty a no-op uploader is
-// returned so the recorder still works with local-only storage.
+// NewUploader builds an Uploader for audio recording (.ulaw) files.
+// If cfg.GCSBucket is empty a no-op uploader is returned so the recorder still
+// works with local-only storage.
 func NewUploader(ctx context.Context, cfg *Config, log *slog.Logger) (Uploader, error) {
 	if cfg.GCSBucket == "" {
 		log.Warn("GCS bucket not configured; recordings will stay on local disk")
 		return &noopUploader{log: log}, nil
 	}
+	return newGCSUploader(ctx, cfg, cfg.GCSBucket, cfg.GCSObjectPrefix, []string{"*.ulaw"}, log)
+}
 
+// NewMetadataUploader builds an Uploader dedicated to per-call metadata JSON
+// files. It writes to cfg.GCSMetadataBucket and only sweeps *.json files.
+// If cfg.GCSMetadataBucket is empty a no-op uploader is returned.
+func NewMetadataUploader(ctx context.Context, cfg *Config, log *slog.Logger) (Uploader, error) {
+	if cfg.GCSMetadataBucket == "" {
+		log.Warn("GCS metadata bucket not configured; metadata JSON files will stay on local disk")
+		return &noopUploader{log: log}, nil
+	}
+	return newGCSUploader(ctx, cfg, cfg.GCSMetadataBucket, cfg.GCSMetadataObjectPrefix, []string{"*.json"}, log)
+}
+
+// newGCSUploader is the shared constructor used by NewUploader and NewMetadataUploader.
+func newGCSUploader(ctx context.Context, cfg *Config, bucket, prefix string, sweepPatterns []string, log *slog.Logger) (Uploader, error) {
 	var opts []option.ClientOption
 	if cfg.GCPCredentialsFile != "" {
 		opts = append(opts, option.WithCredentialsFile(cfg.GCPCredentialsFile))
@@ -86,18 +103,19 @@ func NewUploader(ctx context.Context, cfg *Config, log *slog.Logger) (Uploader, 
 	}
 
 	u := &gcsUploader{
-		client:      client,
-		bucket:      cfg.GCSBucket,
-		prefix:      cfg.GCSObjectPrefix,
-		dir:         cfg.RecordingDir,
-		deleteAfter: cfg.DeleteAfterUpload,
-		maxRetries:  cfg.UploadMaxRetries,
-		log:         log.With("gcsBucket", cfg.GCSBucket),
-		queue:       make(chan string, 1024),
-		stop:        make(chan struct{}),
-		closed:      make(chan struct{}),
-		active:      make(map[string]struct{}),
-		pending:     make(map[string]struct{}),
+		client:        client,
+		bucket:        bucket,
+		prefix:        prefix,
+		dir:           cfg.RecordingDir,
+		deleteAfter:   cfg.DeleteAfterUpload,
+		maxRetries:    cfg.UploadMaxRetries,
+		sweepPatterns: sweepPatterns,
+		log:           log.With("gcsBucket", bucket),
+		queue:         make(chan string, 1024),
+		stop:          make(chan struct{}),
+		closed:        make(chan struct{}),
+		active:        make(map[string]struct{}),
+		pending:       make(map[string]struct{}),
 	}
 
 	for i := 0; i < workers; i++ {
@@ -147,24 +165,26 @@ func (u *gcsUploader) Enqueue(p string) {
 	}
 }
 
-// Sweep enqueues any *.ulaw files in the recording dir that are neither active
-// nor already pending (recovers orphaned/failed uploads).
+// Sweep enqueues files matching the uploader's sweep patterns that are neither
+// active nor already pending (recovers orphaned/failed uploads after a crash).
 func (u *gcsUploader) Sweep() {
-	matches, err := filepath.Glob(filepath.Join(u.dir, "*.ulaw"))
-	if err != nil {
-		u.log.Error("upload sweep glob failed", "err", err)
-		return
-	}
-	for _, p := range matches {
-		u.mu.Lock()
-		_, isActive := u.active[p]
-		_, isPending := u.pending[p]
-		u.mu.Unlock()
-		if isActive || isPending {
+	for _, pattern := range u.sweepPatterns {
+		matches, err := filepath.Glob(filepath.Join(u.dir, pattern))
+		if err != nil {
+			u.log.Error("upload sweep glob failed", "err", err, "pattern", pattern)
 			continue
 		}
-		u.log.Info("sweeping orphaned recording for upload", "file", p)
-		u.Enqueue(p)
+		for _, p := range matches {
+			u.mu.Lock()
+			_, isActive := u.active[p]
+			_, isPending := u.pending[p]
+			u.mu.Unlock()
+			if isActive || isPending {
+				continue
+			}
+			u.log.Info("sweeping orphaned file for upload", "file", p)
+			u.Enqueue(p)
+		}
 	}
 }
 
@@ -244,7 +264,12 @@ func (u *gcsUploader) upload(p, objectName string) error {
 	defer f.Close()
 
 	w := u.client.Bucket(u.bucket).Object(objectName).NewWriter(ctx)
-	w.ContentType = "audio/basic" // G.711 mu-law
+	switch filepath.Ext(p) {
+	case ".json":
+		w.ContentType = "application/json"
+	default:
+		w.ContentType = "audio/basic" // G.711 mu-law
+	}
 	if _, err := io.Copy(w, f); err != nil {
 		_ = w.Close()
 		return fmt.Errorf("copy to GCS: %w", err)

@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"time"
 
 	mediartpsdk "github.com/livekit/media-sdk/rtp"
@@ -15,20 +18,20 @@ import (
 
 // recorderServer is the minimal SIPREC recording SIP server.
 type recorderServer struct {
-	cfg      *Config
-	log      *slog.Logger
-	ua       *sipgo.UserAgent
-	srv      *sipgo.Server
-	sessions *sessionStore
-	pub      Publisher
-	uploader Uploader
-	listener net.PacketConn
-	mediaIP  string
+	cfg          *Config
+	log          *slog.Logger
+	ua           *sipgo.UserAgent
+	srv          *sipgo.Server
+	sessions     *sessionStore
+	uploader     Uploader // audio recording (.ulaw) uploader
+	metaUploader Uploader // per-call metadata JSON uploader
+	listener     net.PacketConn
+	mediaIP      string
 }
 
 // NewServer constructs the SIP server, registers handlers, and prepares the
 // RTP port allocator. It does not start listening until Start is called.
-func NewServer(cfg *Config, pub Publisher, uploader Uploader, log *slog.Logger) (*recorderServer, error) {
+func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, log *slog.Logger) (*recorderServer, error) {
 	mediaIP := cfg.MediaIP
 	if mediaIP == "" {
 		ip, err := detectMediaIP()
@@ -50,14 +53,14 @@ func NewServer(cfg *Config, pub Publisher, uploader Uploader, log *slog.Logger) 
 	}
 
 	s := &recorderServer{
-		cfg:      cfg,
-		log:      log,
-		ua:       ua,
-		srv:      srv,
-		sessions: newSessionStore(),
-		pub:      pub,
-		uploader: uploader,
-		mediaIP:  mediaIP,
+		cfg:          cfg,
+		log:          log,
+		ua:           ua,
+		srv:          srv,
+		sessions:     newSessionStore(),
+		uploader:     uploader,
+		metaUploader: metaUploader,
+		mediaIP:      mediaIP,
 	}
 
 	srv.OnInvite(s.onInvite)
@@ -98,8 +101,14 @@ func (s *recorderServer) Stop() {
 		_ = s.listener.Close()
 	}
 
+	shutdownTime := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, sess := range s.sessions.DrainAll() {
 		sess.Close()
+		if metaPath, err := s.writeMetadataJSON(sess, shutdownTime, nil); err != nil {
+			s.log.Error("failed to write call metadata JSON on shutdown", "err", err, "sipCallID", sess.CallID)
+		} else {
+			s.metaUploader.Enqueue(metaPath)
+		}
 		for _, p := range sess.RecordingFiles() {
 			s.uploader.Enqueue(p)
 		}
@@ -112,6 +121,7 @@ func (s *recorderServer) Stop() {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	s.uploader.Shutdown(ctx)
+	s.metaUploader.Shutdown(ctx)
 }
 
 // onInvite handles incoming INVITEs, accepting only SIPREC INVITEs.
@@ -254,18 +264,6 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 	}
 	s.sessions.Set(callID, sess)
 
-	s.pub.Publish(context.Background(), &SiprecEvent{
-		Event:          EventCallStart,
-		Timestamp:      sess.StartTime,
-		SIPCallID:      callID,
-		From:           sess.From,
-		To:             sess.To,
-		SourceIP:       sess.SourceIP,
-		RecordingFiles: sess.RecordingFiles(),
-		SiprecMetadata: sess.Metadata,
-		SIPHeaders:     sess.Headers,
-	})
-
 	log.Info("SIPREC recording established",
 		"files", sess.RecordingFiles(),
 		"sip_headers", sess.Headers,
@@ -310,24 +308,19 @@ func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTr
 	)
 	sess.Close()
 
+	// Write per-call metadata JSON and enqueue it for upload to the metadata
+	// bucket. Errors are non-fatal; audio recording upload still proceeds.
+	if metaPath, err := s.writeMetadataJSON(sess, endTimeISO, byeMeta); err != nil {
+		s.log.Error("failed to write call metadata JSON", "err", err, "sipCallID", callID)
+	} else {
+		s.metaUploader.Enqueue(metaPath)
+		s.log.Info("enqueued call metadata JSON for upload", "file", metaPath)
+	}
+
 	// Recording files are now closed; upload them (and delete locally on success).
 	for _, p := range sess.RecordingFiles() {
 		s.uploader.Enqueue(p)
 	}
-
-	s.pub.Publish(context.Background(), &SiprecEvent{
-		Event:          EventCallEnd,
-		Timestamp:      endTimeISO,
-		SIPCallID:      callID,
-		From:           sess.From,
-		To:             sess.To,
-		SourceIP:       sess.SourceIP,
-		RecordingFiles: sess.RecordingFiles(),
-		SiprecMetadata: sess.Metadata,
-		ByeMetadata:    byeMeta,
-		SIPHeaders:     sess.Headers,
-		Reason:         "bye",
-	})
 }
 
 // onOptions answers OPTIONS pings.
@@ -346,6 +339,61 @@ func (s *recorderServer) respond(tx sip.ServerTransaction, req *sip.Request, cod
 	if err := tx.Respond(resp); err != nil {
 		s.log.Error("failed to send SIP response", "err", err, "code", int(code))
 	}
+}
+
+// =============================================================================
+// Metadata JSON
+// =============================================================================
+
+// callMetadataRecord is written to GCS as a JSON file once per call. It
+// captures everything known at both INVITE and BYE time so that downstream
+// consumers have a single, self-contained document per call.
+type callMetadataRecord struct {
+	SIPCallID      string            `json:"sip_call_id"`
+	From           string            `json:"from,omitempty"`
+	To             string            `json:"to,omitempty"`
+	SourceIP       string            `json:"source_ip,omitempty"`
+	StartTime      string            `json:"start_time,omitempty"`
+	EndTime        string            `json:"end_time,omitempty"`
+	RecordingFiles map[string]string `json:"recording_files,omitempty"`
+	SIPHeaders     map[string]string `json:"sip_headers,omitempty"`
+	InviteMetadata *SiprecMetadata   `json:"invite_metadata,omitempty"`
+	ByeMetadata    *SiprecMetadata   `json:"bye_metadata,omitempty"`
+}
+
+// writeMetadataJSON serialises call metadata to a JSON file in the recording
+// directory and returns its path. The filename mirrors the recording naming
+// convention: {callID}_{dnis}_{ani}_{startTimeMs}.json
+func (s *recorderServer) writeMetadataJSON(sess *recSession, endTimeISO string, byeMeta *SiprecMetadata) (string, error) {
+	record := &callMetadataRecord{
+		SIPCallID:      sess.CallID,
+		From:           sess.From,
+		To:             sess.To,
+		SourceIP:       sess.SourceIP,
+		StartTime:      sess.StartTime,
+		EndTime:        endTimeISO,
+		RecordingFiles: sess.RecordingFiles(),
+		SIPHeaders:     sess.Headers,
+		InviteMetadata: sess.Metadata,
+		ByeMetadata:    byeMeta,
+	}
+
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal metadata: %w", err)
+	}
+
+	name := fmt.Sprintf("%s_%s_%s_%d.json",
+		sanitizeFileComponent(sess.CallID),
+		sanitizeFileComponent(sess.To),   // DNIS
+		sanitizeFileComponent(sess.From), // ANI
+		sess.CreatedAt.UnixMilli(),
+	)
+	p := filepath.Join(s.cfg.RecordingDir, name)
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		return "", fmt.Errorf("write metadata file: %w", err)
+	}
+	return p, nil
 }
 
 // =============================================================================

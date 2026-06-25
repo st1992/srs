@@ -14,18 +14,20 @@ rtp_port_end: 11000
 # Directory where .ulaw recording files are written.
 recording_dir: "./recordings"
 
-# GCP Cloud Pub/Sub settings. Leave project/topic empty to disable publishing.
-pubsub_project_id: ""
-pubsub_topic_id: ""
-
 # Optional path to a GCP service account JSON key. If empty, Application
 # Default Credentials are used (e.g. GKE Workload Identity).
 gcp_credentials_file: ""
 
-# Google Cloud Storage upload settings.
-# Leave gcs_bucket empty to disable uploading (recordings stay on local disk).
+# Google Cloud Storage — audio recordings.
+# Leave gcs_bucket empty to keep recordings on local disk only.
 gcs_bucket: ""
 gcs_object_prefix: "recordings"
+
+# Google Cloud Storage — per-call metadata JSON files.
+# A separate bucket keeps metadata queryable independently of the audio files.
+# Leave gcs_metadata_bucket empty to keep metadata files on local disk only.
+gcs_metadata_bucket: ""
+gcs_metadata_object_prefix: "metadata"
 
 # Delete the local .ulaw file only after a successful GCS upload.
 delete_after_upload: true

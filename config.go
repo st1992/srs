@@ -24,12 +24,6 @@ type Config struct {
 	// RecordingDir is the directory where .ulaw files are written.
 	RecordingDir string `yaml:"recording_dir"`
 
-	// PubSubProjectID is the GCP project ID hosting the Pub/Sub topic.
-	PubSubProjectID string `yaml:"pubsub_project_id"`
-
-	// PubSubTopicID is the GCP Pub/Sub topic to publish SIPREC events to.
-	PubSubTopicID string `yaml:"pubsub_topic_id"`
-
 	// GCPCredentialsFile is an optional path to a GCP service account JSON key.
 	// If empty, Application Default Credentials are used (e.g. Workload Identity).
 	GCPCredentialsFile string `yaml:"gcp_credentials_file"`
@@ -38,8 +32,16 @@ type Config struct {
 	// If empty, uploading is disabled and recordings remain on local disk.
 	GCSBucket string `yaml:"gcs_bucket"`
 
-	// GCSObjectPrefix is an optional prefix (folder) prepended to object names.
+	// GCSObjectPrefix is an optional prefix (folder) prepended to recording object names.
 	GCSObjectPrefix string `yaml:"gcs_object_prefix"`
+
+	// GCSMetadataBucket is the GCS bucket where per-call metadata JSON files are
+	// uploaded. If empty, metadata files remain on local disk only.
+	GCSMetadataBucket string `yaml:"gcs_metadata_bucket"`
+
+	// GCSMetadataObjectPrefix is an optional prefix prepended to metadata object names.
+	// Defaults to "metadata".
+	GCSMetadataObjectPrefix string `yaml:"gcs_metadata_object_prefix"`
 
 	// DeleteAfterUpload removes the local .ulaw file only after a successful
 	// upload to GCS. Defaults to true.
@@ -68,6 +70,8 @@ func DefaultConfig() Config {
 		RTPPortStart:             10000,
 		RTPPortEnd:               11000,
 		RecordingDir:             ".",
+		GCSObjectPrefix:          "recordings",
+		GCSMetadataObjectPrefix:  "metadata",
 		DeleteAfterUpload:        true,
 		UploadWorkers:            2,
 		UploadMaxRetries:         5,

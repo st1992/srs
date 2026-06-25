@@ -2,8 +2,8 @@
 //
 // It answers SIPREC INVITEs, receives the two RTP audio streams, writes the raw
 // PCMU (G.711 mu-law) payloads to .ulaw files without any transcoding, parses
-// the rs-metadata XML and SIP headers, and publishes call events to a GCP Cloud
-// Pub/Sub topic.
+// the rs-metadata XML and SIP headers, and uploads per-call metadata JSON files
+// to a dedicated GCS bucket.
 package main
 
 import (
@@ -55,12 +55,6 @@ func main() {
 	}
 
 	ctx := context.Background()
-	pub, err := NewPublisher(ctx, cfg, log)
-	if err != nil {
-		log.Error("failed to initialize Pub/Sub publisher", "err", err)
-		os.Exit(1)
-	}
-	defer pub.Close()
 
 	uploader, err := NewUploader(ctx, cfg, log)
 	if err != nil {
@@ -68,7 +62,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv, err := NewServer(cfg, pub, uploader, log)
+	metaUploader, err := NewMetadataUploader(ctx, cfg, log)
+	if err != nil {
+		log.Error("failed to initialize GCS metadata uploader", "err", err)
+		os.Exit(1)
+	}
+
+	srv, err := NewServer(cfg, uploader, metaUploader, log)
 	if err != nil {
 		log.Error("failed to create SIPREC server", "err", err)
 		os.Exit(1)

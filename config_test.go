@@ -18,8 +18,9 @@ media_ip: "10.1.2.3"
 rtp_port_start: 20000
 rtp_port_end: 21000
 recording_dir: "/tmp/recordings"
-pubsub_project_id: "my-project"
-pubsub_topic_id: "siprec-events"
+gcs_bucket: "my-recordings"
+gcs_metadata_bucket: "my-metadata"
+gcs_metadata_object_prefix: "calls"
 `
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 
@@ -31,16 +32,17 @@ pubsub_topic_id: "siprec-events"
 	assert.Equal(t, 20000, cfg.RTPPortStart)
 	assert.Equal(t, 21000, cfg.RTPPortEnd)
 	assert.Equal(t, "/tmp/recordings", cfg.RecordingDir)
-	assert.Equal(t, "my-project", cfg.PubSubProjectID)
-	assert.Equal(t, "siprec-events", cfg.PubSubTopicID)
+	assert.Equal(t, "my-recordings", cfg.GCSBucket)
+	assert.Equal(t, "my-metadata", cfg.GCSMetadataBucket)
+	assert.Equal(t, "calls", cfg.GCSMetadataObjectPrefix)
 }
 
 func TestLoadConfig_AppliesDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 
-	// Only override the project; everything else should use defaults.
-	require.NoError(t, os.WriteFile(path, []byte("pubsub_project_id: \"p\"\n"), 0o644))
+	// Only override one field; everything else should use defaults.
+	require.NoError(t, os.WriteFile(path, []byte("gcs_bucket: \"my-bucket\"\n"), 0o644))
 
 	cfg, err := LoadConfig(path)
 	require.NoError(t, err)
