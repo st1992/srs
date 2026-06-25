@@ -168,38 +168,27 @@ data:
         }
 
         # ── New SIPREC INVITE ─────────────────────────────────────────────
-        # Insert Record-Route so all subsequent in-dialog messages traverse
-        # this proxy, then dispatch to a SIPREC recorder.
+        # Pick a recorder, pin the outbound socket to the VIP, THEN insert
+        # the Record-Route. Order matters: record_route() snapshots the
+        # currently-selected send socket into the RR URI. If we call it
+        # before force_send_socket(), the RR may be stamped with the
+        # node's primary interface address instead of the VIP, breaking
+        # in-dialog routing back through the LB.
         if (is_method("INVITE")) {
+            if (!ds_select_dst("1", "4", "1")) {
+                xlog("L_ERR", "dispatcher: no live recorder available for session $ci\n");
+                sl_send_reply("503", "Service Unavailable — no recorders available");
+                exit;
+            }
+            force_send_socket(udp:{{ .Values.kamailio.advertiseAddress }}:5060);
             record_route();
-            route(DISPATCH);
+            xlog("L_INFO", "SIPREC session $ci dispatched to recorder $du\n");
+            t_on_failure("RECORDER_FAILOVER");
+            route(RELAY);
             exit;
         }
 
         sl_send_reply("405", "Method Not Allowed");
-    }
-
-    # ── Load-balance new calls across SIPREC recorders ────────────────────────
-    # Algorithm 4 = round-robin.  On failure the failure_route tries the next
-    # available destination automatically.
-    route[DISPATCH] {
-        if (!ds_select_dst(1, 4)) {
-            xlog("L_ERR", "dispatcher: no live recorder available for session $ci\n");
-            sl_send_reply("503", "Service Unavailable — no recorders available");
-            exit;
-        }
-        # Pin the outbound socket to the advertise address. With
-        # listen=0.0.0.0 the kernel may otherwise pick the node's primary
-        # interface IP as the source, and the recorder would then stamp
-        # that node IP into the dialog's return path — causing the SBC's
-        # in-dialog ACK/BYE to bypass the LB VIP (or to fail the dialog
-        # match on the way back in). The alias= directive above is what
-        # makes this socket selector resolvable even though we don't bind
-        # explicitly on the advertise IP.
-        force_send_socket(udp:{{ .Values.kamailio.advertiseAddress }}:5060);
-        xlog("L_INFO", "SIPREC session $ci dispatched to recorder $du\n");
-        t_on_failure("RECORDER_FAILOVER");
-        route(RELAY);
     }
 
     route[RELAY] {

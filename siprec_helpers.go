@@ -253,7 +253,15 @@ func ensureMediaConnection(media, session []SDPLine) []SDPLine {
 
 // CreateSiprecResponse creates a SIP 200 OK response for a SIPREC INVITE with
 // the combined SDP from the two recording legs.
-func CreateSiprecResponse(originalInvite *sip.Request, combinedSDP string) *sip.Response {
+//
+// contactHost / contactPort must be the recorder's own SIP signalling address
+// (typically the pod / node IP and the port we listen on). They become the
+// Contact header used by the remote party to address all in-dialog requests
+// (ACK, BYE, re-INVITE). MUST NOT default to the inbound RURI: that RURI is
+// the address the SBC sent the INVITE to (e.g. an upstream proxy / LB VIP),
+// not us — using it as Contact causes in-dialog traffic to loop through the
+// proxy or get 404'd by a recorder whose sipgo mux doesn't recognise the URI.
+func CreateSiprecResponse(originalInvite *sip.Request, combinedSDP string, contactHost string, contactPort int) *sip.Response {
 	resp := sip.NewResponseFromRequest(originalInvite, 200, "OK", []byte(combinedSDP))
 
 	if toHeader := resp.To(); toHeader != nil {
@@ -266,8 +274,12 @@ func CreateSiprecResponse(originalInvite *sip.Request, combinedSDP string) *sip.
 	contactParams := sip.NewParams()
 	contactParams.Add("transport", "udp")
 	resp.AppendHeader(&sip.ContactHeader{
-		Address: originalInvite.Recipient,
-		Params:  contactParams,
+		Address: sip.Uri{
+			User: originalInvite.Recipient.User,
+			Host: contactHost,
+			Port: contactPort,
+		},
+		Params: contactParams,
 	})
 
 	resp.RemoveHeader("Content-Type")

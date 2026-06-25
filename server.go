@@ -27,6 +27,12 @@ type recorderServer struct {
 	metaUploader Uploader // per-call metadata JSON uploader
 	listener     net.PacketConn
 	mediaIP      string
+	// sipContactHost / sipContactPort are stamped into the Contact header of
+	// every 200 OK we send. They MUST resolve back to this pod's SIP socket
+	// from the SBC's perspective, otherwise in-dialog ACK/BYE either loop
+	// through the proxy or get 404'd by the receiving sipgo mux.
+	sipContactHost string
+	sipContactPort int
 }
 
 // NewServer constructs the SIP server, registers handlers, and prepares the
@@ -52,15 +58,34 @@ func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, log *slog.
 		return nil, fmt.Errorf("failed to create SIP server: %w", err)
 	}
 
+	// Derive the SIP Contact host/port from the configured SIP listen address.
+	// If the listen address binds to 0.0.0.0 (typical with hostNetwork=true)
+	// we fall back to the auto-detected non-loopback IPv4, which on a host-
+	// networked pod equals the node IP — that's the address the SBC will be
+	// able to reach this recorder on for in-dialog traffic.
+	sipHost, sipPort, err := splitHostPort(cfg.SIPListenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid sip_listen_addr %q: %w", cfg.SIPListenAddr, err)
+	}
+	if sipHost == "" || sipHost == "0.0.0.0" || sipHost == "::" {
+		detected, derr := detectMediaIP()
+		if derr != nil {
+			return nil, fmt.Errorf("sip_listen_addr binds to wildcard and IP auto-detect failed: %w", derr)
+		}
+		sipHost = detected
+	}
+
 	s := &recorderServer{
-		cfg:          cfg,
-		log:          log,
-		ua:           ua,
-		srv:          srv,
-		sessions:     newSessionStore(),
-		uploader:     uploader,
-		metaUploader: metaUploader,
-		mediaIP:      mediaIP,
+		cfg:            cfg,
+		log:            log,
+		ua:             ua,
+		srv:            srv,
+		sessions:       newSessionStore(),
+		uploader:       uploader,
+		metaUploader:   metaUploader,
+		mediaIP:        mediaIP,
+		sipContactHost: sipHost,
+		sipContactPort: sipPort,
 	}
 
 	srv.OnInvite(s.onInvite)
@@ -244,7 +269,7 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 		go rec.run()
 	}
 
-	resp := CreateSiprecResponse(req, combinedSDP)
+	resp := CreateSiprecResponse(req, combinedSDP, s.sipContactHost, s.sipContactPort)
 	if err := tx.Respond(resp); err != nil {
 		log.Error("failed to send SIPREC 200 OK", "err", err)
 		cleanup()
@@ -445,6 +470,20 @@ func collectSIPHeaders(req *sip.Request) map[string]string {
 
 func isClosedErr(err error) bool {
 	return err != nil && (err == net.ErrClosed || err.Error() == "use of closed network connection")
+}
+
+// splitHostPort splits "host:port" into its parts, returning the port as int.
+// Accepts an empty host (e.g. ":5060") and reports it as "".
+func splitHostPort(addr string) (string, int, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", 0, err
+	}
+	port, err := net.LookupPort("udp", portStr)
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid port %q: %w", portStr, err)
+	}
+	return host, port, nil
 }
 
 // detectMediaIP picks the first non-loopback IPv4 address on the host.

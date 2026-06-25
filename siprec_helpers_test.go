@@ -137,7 +137,7 @@ func TestCreateSiprecResponse(t *testing.T) {
 
 	combinedSDP := "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=test\r\nt=0 0\r\nm=audio 5000 RTP/AVP 0\r\na=recvonly\r\n"
 
-	resp := CreateSiprecResponse(req, combinedSDP)
+	resp := CreateSiprecResponse(req, combinedSDP, "10.0.0.1", 5060)
 
 	assert.Equal(t, sip.StatusCode(200), resp.StatusCode)
 	assert.Equal(t, "OK", resp.Reason)
