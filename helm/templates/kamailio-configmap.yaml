@@ -32,6 +32,13 @@ data:
     log_stderror=yes
     log_facility=LOG_LOCAL0
 
+    # Suppress the "Server: kamailio (<ver>)" header in locally-generated
+    # replies (e.g. 100 Trying, 200 OK to OPTIONS, error responses). Avoids
+    # leaking the proxy software/version to upstream SBCs.
+    server_signature=no
+    server_header="Server:"
+    user_agent_header="User-Agent:"
+
     # Run in the foreground; container runtime handles process supervision.
     # fork=no keeps PID 1 attached so Kubernetes sees the real Kamailio process
     # and SIGTERM is delivered correctly during pod termination.
