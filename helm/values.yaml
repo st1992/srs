@@ -64,6 +64,9 @@ kamailio:
   service:
     type: LoadBalancer
     port: 5060
+    # Pin the internal LB to a specific pre-reserved VPC IP.
+    # Leave empty to let GCP auto-assign one from the subnet.
+    loadBalancerIP: "100.73.16.5"
     # GKE Internal Passthrough Network Load Balancer (L4).
     # Exposes Kamailio on a private VPC IP — no public internet exposure.
     # externalTrafficPolicy: Local (set in the template) makes GCP skip SNAT

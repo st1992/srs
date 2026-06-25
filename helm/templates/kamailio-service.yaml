@@ -15,6 +15,9 @@ metadata:
     {{- end }}
 spec:
   type: {{ .Values.kamailio.service.type }}
+  {{- with .Values.kamailio.service.loadBalancerIP }}
+  loadBalancerIP: {{ . | quote }}
+  {{- end }}
   # GKE's Internal Passthrough NLB only supports one protocol per forwarding
   # rule.  SIPREC traffic is UDP, so we expose only UDP through the LB.
   # The pod still listens on TCP/5060 via hostNetwork for any in-cluster
