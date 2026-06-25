@@ -1,0 +1,16 @@
+apiVersion: v2
+name: siprec-stack
+description: >
+  Kamailio SIPREC proxy (single dedicated node, host-network) + streamlink
+  SIPREC recorder DaemonSet (one pod per recorder node, maximum resource claim).
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - siprec
+  - kamailio
+  - sip
+  - recording
+  - rtp
+maintainers:
+  - name: platform-team

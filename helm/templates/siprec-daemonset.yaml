@@ -1,0 +1,131 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "siprec.fullname" . }}
+  namespace: {{ include "siprec-stack.namespace" . }}
+  labels:
+    {{- include "siprec.labels" . | nindent 4 }}
+  annotations:
+    siprec-stack/role: "siprec-recorder"
+    siprec-stack/scaling: "one-pod-per-recorder-node"
+spec:
+  selector:
+    matchLabels:
+      {{- include "siprec.selectorLabels" . | nindent 6 }}
+
+  updateStrategy:
+    type: {{ .Values.siprecRecorder.updateStrategy.type }}
+    {{- if eq .Values.siprecRecorder.updateStrategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxUnavailable: {{ .Values.siprecRecorder.updateStrategy.rollingUpdate.maxUnavailable }}
+    {{- end }}
+
+  template:
+    metadata:
+      labels:
+        {{- include "siprec.labels" . | nindent 8 }}
+      annotations:
+        # Restart pods when config.yaml changes.
+        checksum/siprec-config: {{ include (print $.Template.BasePath "/siprec-configmap.yaml") . | sha256sum }}
+    spec:
+      # ── Node placement ────────────────────────────────────────────────────
+      # Schedule exclusively on nodes labelled siprec-role=recorder.
+      # Tainting those nodes ensures no other user workloads land there:
+      #   kubectl taint node <node> siprec-role=recorder:NoSchedule
+      nodeSelector:
+        {{- toYaml .Values.siprecRecorder.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.siprecRecorder.tolerations | nindent 8 }}
+
+      # ── Host network ──────────────────────────────────────────────────────
+      # RTP media is sent directly to/from the node's IP without any NAT or
+      # port-mapping overhead.  SIP signalling from Kamailio also targets the
+      # node IP (populated in dispatcher.list by Kamailio's init-container).
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+
+      # Allow ongoing RTP sessions and in-flight GCS uploads to finish cleanly
+      # before the pod is force-killed.
+      terminationGracePeriodSeconds: 60
+
+      # ── Security context ──────────────────────────────────────────────────
+      # The recorder runs as the non-root "siprec" user (UID/GID 1000) defined
+      # in the Dockerfile.  Binding port 5060 requires NET_BIND_SERVICE when
+      # the port number is < 1024; the container image must set this or the
+      # sip_listen_addr should use a port ≥ 1024 instead.
+      securityContext:
+        runAsNonRoot: false   # Keep false; CAP_NET_BIND_SERVICE requires root or cap
+      containers:
+        - name: siprec-recorder
+          image: "{{ .Values.siprecRecorder.image.repository }}:{{ .Values.siprecRecorder.image.tag }}"
+          imagePullPolicy: {{ .Values.siprecRecorder.image.pullPolicy }}
+
+          # ── Resource claim ────────────────────────────────────────────────
+          # requests should be close to the node's total allocatable capacity
+          # so the Kubernetes scheduler treats the node as fully committed and
+          # avoids co-scheduling other pods.  limits may match node capacity.
+          #
+          # Tune via values.yaml:
+          #   siprecRecorder.resources.requests.cpu / memory
+          #   siprecRecorder.resources.limits.cpu   / memory
+          resources:
+            {{- toYaml .Values.siprecRecorder.resources | nindent 12 }}
+
+          ports:
+            - name: sip-udp
+              containerPort: 5060
+              hostPort: 5060
+              protocol: UDP
+
+            # RTP range — declared here for documentation; Kubernetes does not
+            # map large ranges in Service objects, but with hostNetwork=true
+            # the ports are directly accessible on the node IP.
+            - name: rtp-start
+              containerPort: {{ .Values.siprecRecorder.config.rtpPortStart }}
+              hostPort: {{ .Values.siprecRecorder.config.rtpPortStart }}
+              protocol: UDP
+
+          # ── Health probes ──────────────────────────────────────────────────
+          # Uses only POSIX tools available in the minimal Alpine image;
+          # matches the HEALTHCHECK defined in the Dockerfile.
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "kill -0 1 && grep -q siprec-recorder /proc/1/cmdline"
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "kill -0 1 && grep -q siprec-recorder /proc/1/cmdline"
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: siprec-config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            # Durable recording staging area — backed by a host path so that
+            # recordings survive pod restarts and can be re-uploaded on next start.
+            - name: recordings
+              mountPath: /app/recordings
+
+      volumes:
+        - name: siprec-config
+          configMap:
+            name: {{ include "siprec.fullname" . }}-config
+        - name: recordings
+          hostPath:
+            # Created automatically by the kubelet if it does not exist.
+            path: {{ .Values.siprecRecorder.recordingsHostPath }}
+            type: DirectoryOrCreate

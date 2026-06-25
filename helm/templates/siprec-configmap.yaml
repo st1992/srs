@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "siprec.fullname" . }}-config
+  namespace: {{ include "siprec-stack.namespace" . }}
+  labels:
+    {{- include "siprec.labels" . | nindent 4 }}
+data:
+  # Rendered from .Values.siprecRecorder.config and mounted at /app/config.yaml
+  # inside each recorder pod.
+  config.yaml: |
+    # SIPREC Recorder configuration — managed by Helm, do not edit manually.
+
+    # SIP listen address.  0.0.0.0 works correctly with hostNetwork=true because
+    # the pod inherits all of the node's network interfaces.
+    sip_listen_addr: "{{ .Values.siprecRecorder.config.sipListenAddr }}"
+
+    # Public IP advertised in SDP answers for RTP media.
+    # Empty → auto-detect the node's primary non-loopback IPv4 address at startup.
+    # With hostNetwork=true this correctly resolves to the physical node IP.
+    media_ip: "{{ .Values.siprecRecorder.config.mediaIP }}"
+
+    # RTP port range (inclusive).  Each concurrent SIPREC session consumes 2 ports
+    # (one per audio leg).  Default 10000–30000 covers up to 10 000 sessions on
+    # a c2-standard-4 node.
+    rtp_port_start: {{ .Values.siprecRecorder.config.rtpPortStart }}
+    rtp_port_end:   {{ .Values.siprecRecorder.config.rtpPortEnd }}
+
+    # Directory where .ulaw recording files are staged before upload.
+    # Mounted from hostPath {{ .Values.siprecRecorder.recordingsHostPath }}
+    # so recordings survive pod restarts.
+    recording_dir: "{{ .Values.siprecRecorder.config.recordingDir }}"
+
+    # GCP Pub/Sub — leave empty to disable event publishing.
+    pubsub_project_id: "{{ .Values.siprecRecorder.config.pubsubProjectId }}"
+    pubsub_topic_id:   "{{ .Values.siprecRecorder.config.pubsubTopicId }}"
+
+    # Optional path to a GCP service-account JSON key.
+    # Leave empty to use Workload Identity (recommended for GKE).
+    gcp_credentials_file: "{{ .Values.siprecRecorder.config.gcpCredentialsFile }}"
+
+    # Google Cloud Storage — leave gcs_bucket empty to keep files on local disk only.
+    gcs_bucket:        "{{ .Values.siprecRecorder.config.gcsBucket }}"
+    gcs_object_prefix: "{{ .Values.siprecRecorder.config.gcsObjectPrefix }}"
+
+    # Remove local file only after a confirmed successful GCS upload.
+    delete_after_upload: {{ .Values.siprecRecorder.config.deleteAfterUpload }}
+
+    # Concurrent GCS upload workers per pod.
+    upload_workers:      {{ .Values.siprecRecorder.config.uploadWorkers }}
+    upload_max_retries:  {{ .Values.siprecRecorder.config.uploadMaxRetries }}
+
+    # How often the recording directory is scanned for orphaned/failed files (seconds).
+    upload_sweep_interval_sec:   {{ .Values.siprecRecorder.config.uploadSweepIntervalSec }}
+
+    # Maximum time to wait for in-flight uploads during graceful shutdown (seconds).
+    shutdown_upload_timeout_sec: {{ .Values.siprecRecorder.config.shutdownUploadTimeoutSec }}

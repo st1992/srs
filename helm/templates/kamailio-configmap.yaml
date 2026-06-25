@@ -1,0 +1,182 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kamailio.fullname" . }}-config
+  namespace: {{ include "siprec-stack.namespace" . }}
+  labels:
+    {{- include "kamailio.labels" . | nindent 4 }}
+data:
+  # ── kamailio.cfg ────────────────────────────────────────────────────────────
+  # SIPREC Proxy configuration.
+  #
+  # Responsibility:
+  #   • Accept inbound SIPREC INVITE from SBCs / call controllers on UDP/TCP 5060.
+  #   • Insert Record-Route so all in-dialog messages (re-INVITE, BYE) return
+  #     through this proxy.
+  #   • Dispatch new calls round-robin across healthy SIPREC recorder pods
+  #     (dispatcher set 1).  Automatically fails over to the next recorder on
+  #     5xx or timeout.
+  #   • Keep the in-dialog route pinned: once a call lands on recorder pod X,
+  #     all subsequent transactions for that dialog go to pod X (via the Route
+  #     set written by record_route).
+  #
+  # dispatcher.list is written at pod startup by the gen-dispatcher-list
+  # init-container, which resolves the headless Service DNS to individual pod IPs.
+  # ────────────────────────────────────────────────────────────────────────────
+  kamailio.cfg: |
+    #!KAMAILIO
+
+    ####### Global Parameters #########
+
+    debug=2
+    log_stderror=yes
+    log_facility=LOG_LOCAL0
+
+    fork=yes
+    children={{ .Values.kamailio.children }}
+
+    # With hostNetwork=true the pod inherits the node's interfaces;
+    # 0.0.0.0 binds on every address present on the node.
+    listen=udp:0.0.0.0:5060
+    listen=tcp:0.0.0.0:5060
+
+    ####### Modules ########
+
+    mpath="{{ .Values.kamailio.modulePath }}"
+
+    loadmodule "sl.so"
+    loadmodule "tm.so"
+    loadmodule "tmx.so"
+    loadmodule "rr.so"
+    loadmodule "pv.so"
+    loadmodule "maxfwd.so"
+    loadmodule "xlog.so"
+    loadmodule "sanity.so"
+    loadmodule "kex.so"
+    loadmodule "dispatcher.so"
+
+    # ── tm ──────────────────────────────────────────────────────────────────
+    modparam("tm", "failure_reply_mode", 3)
+    modparam("tm", "fr_timer",           30000)
+    modparam("tm", "fr_inv_timer",       120000)
+
+    # ── rr ──────────────────────────────────────────────────────────────────
+    modparam("rr", "enable_full_lr",  1)
+    modparam("rr", "append_fromtag",  1)
+
+    # ── dispatcher ──────────────────────────────────────────────────────────
+    # dispatcher.list layout:
+    #   <set-id> sip:<pod-ip>:5060 <flags> <priority>
+    # Populated by the gen-dispatcher-list init-container at pod startup.
+    modparam("dispatcher", "list_file",             "/etc/kamailio/dispatcher.list")
+    modparam("dispatcher", "ds_ping_method",        "OPTIONS")
+    modparam("dispatcher", "ds_ping_interval",      30)
+    # ds_probing_mode 1 = probe only destinations marked inactive
+    modparam("dispatcher", "ds_probing_mode",       1)
+    modparam("dispatcher", "ds_probing_threshold",  3)
+    modparam("dispatcher", "ds_inactive_threshold", 3)
+    # Accept 2xx, 403, 480, 484 as "alive" responses to OPTIONS pings
+    modparam("dispatcher", "ds_ping_reply_codes",   "class=2;code=403;code=480;code=484")
+    modparam("dispatcher", "ds_timer_mode",         1)
+
+    ####### Routing Logic ########
+
+    request_route {
+        # ── Retransmission de-dup ──────────────────────────────────────────
+        if (t_precheck_trans()) {
+            t_check_trans();
+            exit;
+        }
+        t_check_trans();
+
+        # ── Max-Forwards guard ────────────────────────────────────────────
+        if (!mf_process_maxfwd_header(10)) {
+            sl_send_reply("483", "Too Many Hops");
+            exit;
+        }
+
+        # ── Sanity check ──────────────────────────────────────────────────
+        if (!sanity_check("17895", "7")) {
+            xlog("L_ERR", "Malformed SIP message from $si:$sp — discarding\n");
+            exit;
+        }
+
+        # ── CANCEL follows existing transaction ───────────────────────────
+        if (is_method("CANCEL")) {
+            if (t_check_trans()) { route(RELAY); }
+            exit;
+        }
+
+        # ── In-dialog requests (re-INVITE, BYE, ACK for 2xx, …) ──────────
+        # loose_route() pops this proxy's address from the Route set and
+        # sets the next-hop to the recorder's Contact URI, keeping the call
+        # pinned to whichever recorder handled the initial INVITE.
+        if (has_totag()) {
+            if (loose_route()) {
+                route(RELAY);
+            } else {
+                if (is_method("ACK")) {
+                    # ACK for a non-2xx final response — absorb it
+                    route(RELAY);
+                } else {
+                    sl_send_reply("404", "Not Found");
+                }
+            }
+            exit;
+        }
+
+        # ── OPTIONS directed at this proxy (health-check by LB / SBC) ────
+        if (is_method("OPTIONS") && uri==myself) {
+            sl_send_reply("200", "OK");
+            exit;
+        }
+
+        # ── New SIPREC INVITE ─────────────────────────────────────────────
+        # Insert Record-Route so all subsequent in-dialog messages traverse
+        # this proxy, then dispatch to a SIPREC recorder.
+        if (is_method("INVITE")) {
+            record_route();
+            route(DISPATCH);
+            exit;
+        }
+
+        sl_send_reply("405", "Method Not Allowed");
+    }
+
+    # ── Load-balance new calls across SIPREC recorders ────────────────────────
+    # Algorithm 4 = round-robin.  On failure the failure_route tries the next
+    # available destination automatically.
+    route[DISPATCH] {
+        if (!ds_select_dst(1, 4)) {
+            xlog("L_ERR", "dispatcher: no live recorder available for session $ci\n");
+            sl_send_reply("503", "Service Unavailable — no recorders available");
+            exit;
+        }
+        xlog("L_INFO", "SIPREC session $ci dispatched to recorder $du\n");
+        t_on_failure("RECORDER_FAILOVER");
+        route(RELAY);
+    }
+
+    route[RELAY] {
+        if (!t_relay()) {
+            sl_reply_error();
+        }
+        exit;
+    }
+
+    onreply_route { exit; }
+
+    # ── Failover: try next healthy recorder on 5xx or timeout ────────────────
+    failure_route[RECORDER_FAILOVER] {
+        if (t_is_canceled()) { exit; }
+
+        if (t_check_status("(5[0-9][0-9]|408)")) {
+            if (ds_next_dst()) {
+                xlog("L_WARN", "Failover: retrying session $ci on next recorder $du\n");
+                t_on_failure("RECORDER_FAILOVER");
+                route(RELAY);
+                exit;
+            }
+            xlog("L_ERR", "All recorders exhausted for session $ci — returning 503\n");
+        }
+    }
