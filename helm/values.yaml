@@ -37,10 +37,10 @@ kamailio:
   # Leave ~420m CPU and ~1.96Gi for kube-system DaemonSets (kube-proxy, fluentd …).
   resources:
     requests:
-      cpu: "3500m"
+      cpu: "3000m"
       memory: "11Gi"
     limits:
-      cpu: "3600m"
+      cpu: "3100m"
       memory: "12000Mi"
 
   # Kamailio module path inside the container image.
@@ -103,10 +103,10 @@ siprecRecorder:
   # limits    — capped just below allocatable so the pod is always schedulable.
   resources:
     requests:
-      cpu: "3700m"
+      cpu: "3000m"
       memory: "11Gi"
     limits:
-      cpu: "3800m"
+      cpu: "3100m"
       memory: "12000Mi"
 
   updateStrategy:
