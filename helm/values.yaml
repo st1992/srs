@@ -66,6 +66,21 @@ kamailio:
     port: 5060
     # Pin the internal LB to a specific pre-reserved VPC IP.
     # Leave empty to let GCP auto-assign one from the subnet.
+    #
+    # IMPORTANT — shared VIP: this same address also fronts the RTP media
+    # path (UDP rtpPortStart–rtpPortEnd, see siprecRecorder.config below).
+    # The media forwarding rule is created out-of-band by
+    # helm/scripts/setup-media-lb.sh because k8s Services can't express a
+    # 20 000-port range. For both forwarding rules to coexist on the same
+    # IP, reserve it with --purpose=SHARED_LOADBALANCER_VIP first:
+    #
+    #   gcloud compute addresses create streamlink-media-vip \
+    #     --region=<region> --subnet=<subnet> \
+    #     --addresses=100.73.16.5 \
+    #     --purpose=SHARED_LOADBALANCER_VIP
+    #
+    # (setup-media-lb.sh does this automatically if the address doesn't
+    # exist yet.)
     loadBalancerIP: "100.73.16.5"
     # GKE Internal Passthrough Network Load Balancer (L4).
     # Exposes Kamailio on a private VPC IP — no public internet exposure.

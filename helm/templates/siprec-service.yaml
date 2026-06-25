@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "siprec.fullname" . }}
+  namespace: {{ include "siprec-stack.namespace" . }}
+  labels:
+    {{- include "siprec.labels" . | nindent 4 }}
+  annotations:
+    # Standard ClusterIP Service for in-cluster callers that want a single
+    # stable virtual IP / DNS name for SIP signaling to the recorder
+    # DaemonSet, instead of resolving individual pod IPs through the
+    # headless dispatcher-discovery Service.
+    #
+    # DNS:
+    #   {{ include "siprec.fullname" . }}.{{ include "siprec-stack.namespace" . }}.svc.cluster.local:5060
+    #
+    # NOTE: This Service is only reachable from inside the cluster. It does
+    # NOT expose RTP (UDP 10000–30000) to external SBCs — that path is
+    # provisioned out-of-band by helm/scripts/setup-media-lb.sh on the
+    # shared Internal NLB VIP (100.73.16.5).
+    siprec-stack/purpose: "in-cluster-sip-clusterip"
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "siprec.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: sip-udp
+      port: 5060
+      targetPort: sip-udp
+      protocol: UDP
