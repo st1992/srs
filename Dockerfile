@@ -24,12 +24,21 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -o /out/siprec-recorder .
 
 # ---- Runtime stage ----
-FROM alpine:3.20
+# Debian slim so we can `apt install sngrep` for in-pod SIP packet inspection.
+FROM debian:bookworm-slim
 
-# ca-certificates: TLS to GCP Pub/Sub / GCS.
-# tzdata: correct timestamps in structured logs when TZ is overridden.
-RUN apk add --no-cache ca-certificates tzdata && \
-    addgroup -S siprec && adduser -S -G siprec siprec
+# ca-certificates : TLS to GCP Pub/Sub / GCS.
+# tzdata          : correct timestamps in structured logs when TZ is overridden.
+# sngrep          : interactive SIP message viewer for debugging on the pod
+#                   (e.g. `kubectl exec -it <pod> -- sngrep -d any port 5060`).
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tzdata \
+        sngrep \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system siprec \
+    && useradd  --system --gid siprec --home-dir /app --shell /usr/sbin/nologin siprec
 
 WORKDIR /app
 

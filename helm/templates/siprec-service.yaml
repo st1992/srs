@@ -6,25 +6,33 @@ metadata:
   labels:
     {{- include "siprec.labels" . | nindent 4 }}
   annotations:
-    # Standard ClusterIP Service for in-cluster callers that want a single
-    # stable virtual IP / DNS name for SIP signaling to the recorder
-    # DaemonSet, instead of resolving individual pod IPs through the
-    # headless dispatcher-discovery Service.
-    #
-    # DNS:
-    #   {{ include "siprec.fullname" . }}.{{ include "siprec-stack.namespace" . }}.svc.cluster.local:5060
-    #
-    # NOTE: This Service is only reachable from inside the cluster. It does
-    # NOT expose RTP (UDP 10000–30000) to external SBCs — that path is
-    # provisioned out-of-band by helm/scripts/setup-media-lb.sh on the
-    # shared Internal NLB VIP (100.73.16.5).
-    siprec-stack/purpose: "in-cluster-sip-clusterip"
+    # GKE Internal Passthrough Network Load Balancer (L4) fronting the SIPREC
+    # recorder DaemonSet directly — there is no Kamailio proxy in front of it
+    # anymore. SBCs send SIP INVITEs to the LB VIP on UDP/5060; the LB
+    # forwards (passthrough, source-IP preserved) to whichever recorder node
+    # has a ready pod.
+    siprec-stack/purpose: "siprec-recorder-loadbalancer"
+    {{- with .Values.siprecRecorder.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
-  type: ClusterIP
+  type: {{ .Values.siprecRecorder.service.type }}
+  {{- if and (eq .Values.siprecRecorder.service.type "LoadBalancer") .Values.siprecRecorder.service.loadBalancerIP }}
+  # Pin the internal LB to a specific pre-reserved VPC IP. This same VIP also
+  # fronts the RTP media path (UDP rtpPortStart–rtpPortEnd). Because k8s
+  # Services cannot express a 20 000-port UDP range, the media forwarding
+  # rule must be provisioned out-of-band against the same address; reserve
+  # it with --purpose=SHARED_LOADBALANCER_VIP so both rules can coexist.
+  loadBalancerIP: {{ .Values.siprecRecorder.service.loadBalancerIP | quote }}
+  {{- end }}
+  # externalTrafficPolicy: Local makes GCP skip SNAT so the real SBC source
+  # IP reaches the recorder pod, and only nodes with a Ready pod receive
+  # traffic (no cross-node hop, no health-check noise on empty nodes).
+  externalTrafficPolicy: Local
   selector:
     {{- include "siprec.selectorLabels" . | nindent 4 }}
   ports:
     - name: sip-udp
-      port: 5060
+      port: {{ .Values.siprecRecorder.service.port }}
       targetPort: sip-udp
       protocol: UDP

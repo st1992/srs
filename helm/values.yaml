@@ -7,100 +7,22 @@
 #   Memory : ~13.8Gi (eviction threshold + kubelet overhead)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Kamailio — SIPREC proxy
-#
-# Runs as a single Deployment (replicas=1, Recreate strategy) on one dedicated
-# c2-standard-4 node with host networking so that SIP traffic reaches port 5060
-# on the bare node IP.
-#
-# Node preparation:
-#   kubectl label  node <kamailio-node>  siprec-role=kamailio
-#   kubectl taint  node <kamailio-node>  siprec-role=kamailio:NoSchedule
-# ──────────────────────────────────────────────────────────────────────────────
-kamailio:
-  image:
-    repository: us-central1-docker.pkg.dev/div-deai-cx-dev-usc1-ri/cx-sip/cx-streamlink-proxy
-    tag: "dev"
-    pullPolicy: Always
-
-  # Pin to the dedicated Kamailio node.
-  nodeSelector:
-    siprec-role: kamailio
-
-  tolerations:
-    - key: siprec-role
-      operator: Equal
-      value: kamailio
-      effect: NoSchedule
-
-  # Node allocatable: 3920m CPU / ~12.96 GiB (13591716Ki).
-  # Leave ~420m CPU and ~1.96Gi for kube-system DaemonSets (kube-proxy, fluentd …).
-  resources:
-    requests:
-      cpu: "2000m"
-      memory: "11Gi"
-    limits:
-      cpu: "2000m"
-      memory: "11Gi"
-
-  # Kamailio module path inside the container image.
-  #   Debian x86_64 : /usr/lib/x86_64-linux-gnu/kamailio/modules/
-  #   Debian arm64  : /usr/lib/aarch64-linux-gnu/kamailio/modules/
-  modulePath: "/usr/lib/x86_64-linux-gnu/kamailio/modules/"
-
-  # Address advertised in Via / Record-Route / Contact headers. Should be the
-  # stable IP that upstream SBCs use to reach this proxy — typically the
-  # Internal LoadBalancer VIP fronting the Kamailio Service. Without this,
-  # Kamailio puts the node's primary interface IP in those headers, which
-  # breaks in-dialog routing when the LB VIP differs from the node IP.
-  advertiseAddress: "100.73.16.5"
-
-  # Worker processes per listen socket.
-  # c2-standard-4 has 4 vCPUs; 2× gives 8 workers, which keeps all cores busy
-  # under bursty SIP traffic without excessive context-switch overhead.
-  children: 8
-
-  # Service that accepts inbound SIPREC traffic from SBCs / call controllers.
-  service:
-    type: LoadBalancer
-    port: 5060
-    # Pin the internal LB to a specific pre-reserved VPC IP.
-    # Leave empty to let GCP auto-assign one from the subnet.
-    #
-    # IMPORTANT — shared VIP: this same address also fronts the RTP media
-    # path (UDP rtpPortStart–rtpPortEnd, see siprecRecorder.config below).
-    # The media forwarding rule is created out-of-band by
-    # helm/scripts/setup-media-lb.sh because k8s Services can't express a
-    # 20 000-port range. For both forwarding rules to coexist on the same
-    # IP, reserve it with --purpose=SHARED_LOADBALANCER_VIP first:
-    #
-    #   gcloud compute addresses create streamlink-media-vip \
-    #     --region=<region> --subnet=<subnet> \
-    #     --addresses=100.73.16.5 \
-    #     --purpose=SHARED_LOADBALANCER_VIP
-    #
-    # (setup-media-lb.sh does this automatically if the address doesn't
-    # exist yet.)
-    loadBalancerIP: "100.73.16.5"
-    # GKE Internal Passthrough Network Load Balancer (L4).
-    # Exposes Kamailio on a private VPC IP — no public internet exposure.
-    # externalTrafficPolicy: Local (set in the template) makes GCP skip SNAT
-    # so the real SBC source IP reaches Kamailio.
-    annotations:
-      networking.gke.io/load-balancer-type: "Internal"
-      # Optional: pin the NLB to a specific subnet.
-      # networking.gke.io/internal-load-balancer-subnet: "your-subnet-name"
-      # Optional: allow-list source CIDRs (SBC address ranges).
-      # networking.gke.io/load-balancer-source-ranges: "10.0.0.0/8,172.16.0.0/12"
-
-# ──────────────────────────────────────────────────────────────────────────────
 # SIPREC Recorder — streamlink
 #
-# Runs as a DaemonSet so exactly one pod lands on every recorder node.
+# Deployed as a DaemonSet so exactly one pod lands on every recorder node.
 # Uses host networking for direct RTP access; claims the maximum possible
 # CPU and memory on each c2-standard-4 node (4 vCPU / 16 GiB).
 #
-# Node preparation:
+# Topology:
+#   SBC ──SIP/RTP──▶ Internal LB VIP 100.73.16.5
+#                            │  passthrough (Local, no SNAT)
+#                            ▼
+#                    recorder node:5060 / :rtpPort
+#
+# There is no Kamailio proxy in front: SBCs talk directly to the LB VIP that
+# fronts the recorder DaemonSet.
+#
+# Node preparation (single node for now):
 #   kubectl label  node <recorder-node>  siprec-role=recorder
 #   kubectl taint  node <recorder-node>  siprec-role=recorder:NoSchedule
 #
@@ -142,6 +64,31 @@ siprecRecorder:
   # Host path where recordings are staged before GCS upload.
   # The directory is created automatically (type: DirectoryOrCreate).
   recordingsHostPath: /var/lib/siprec/recordings
+
+  # ── Service fronting the DaemonSet ─────────────────────────────────────────
+  # GKE Internal Passthrough Network Load Balancer (L4) that accepts inbound
+  # SIPREC traffic from SBCs / call controllers on UDP/5060 and forwards it
+  # directly to a recorder pod via hostNetwork (externalTrafficPolicy: Local).
+  service:
+    type: LoadBalancer
+    port: 5060
+    # Pre-reserved VPC IP that fronts both SIP signalling (this Service) and
+    # the RTP media path (UDP rtpPortStart–rtpPortEnd, provisioned out-of-band
+    # because a k8s Service can't express a 20 000-port range). Reserve with:
+    #
+    #   gcloud compute addresses create streamlink-media-vip \
+    #     --region=<region> --subnet=<subnet> \
+    #     --addresses=100.73.16.5 \
+    #     --purpose=SHARED_LOADBALANCER_VIP
+    #
+    loadBalancerIP: "100.73.16.5"
+    annotations:
+      # Internal NLB — private VPC only, no public internet exposure.
+      networking.gke.io/load-balancer-type: "Internal"
+      # Optional: pin the NLB to a specific subnet.
+      # networking.gke.io/internal-load-balancer-subnet: "your-subnet-name"
+      # Optional: allow-list source CIDRs (SBC address ranges).
+      # networking.gke.io/load-balancer-source-ranges: "10.0.0.0/8,172.16.0.0/12"
 
   # ── GCP authentication ────────────────────────────────────────────────────
   #
@@ -209,7 +156,7 @@ siprecRecorder:
     # The GCP Internal Passthrough NLB fronting this stack must therefore
     # forward the full rtpPortStart–rtpPortEnd UDP range (in addition to
     # 5060 for SIP) to the recorder DaemonSet's nodes. Each recorder pod
-    # binds 0.0.0.0:<rtpPort> via hostNetwork, so once the packet hits any
+    # binds 0.0.0.0:<rtpPort> via hostNetwork, so once the packet hits the
     # recorder node on the right port it lands on the correct rtpRecorder.
     #
     # Leave this empty ONLY when the SBC can reach the recorder nodes

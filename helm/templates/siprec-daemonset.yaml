@@ -44,8 +44,9 @@ spec:
 
       # ── Host network ──────────────────────────────────────────────────────
       # RTP media is sent directly to/from the node's IP without any NAT or
-      # port-mapping overhead.  SIP signalling from Kamailio also targets the
-      # node IP (populated in dispatcher.list by Kamailio's init-container).
+      # port-mapping overhead.  SIP signalling arrives via the Internal
+      # Passthrough NLB Service (externalTrafficPolicy: Local) on UDP/5060
+      # which the pod also binds on the node IP via hostNetwork.
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
 
