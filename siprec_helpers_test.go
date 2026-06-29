@@ -177,3 +177,52 @@ func isHexString(s string) bool {
 	}
 	return true
 }
+
+// =============================================================================
+// SIP URI / SIPREC metadata helper tests
+// =============================================================================
+
+func TestSIPURIUserPart(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		// Angle-bracket form with parameters (Sonus/Ribbon SBC style)
+		{"<sip:4694733291@10.87.18.117>;isup-oli=62;tag=gK0c6960c2", "4694733291"},
+		{"<sip:8777953602@10.87.18.117:5060;user=phone>;tag=as50b0514d", "8777953602"},
+		// Bare sip: URI
+		{"sip:alice@example.com", "alice"},
+		// sips: scheme
+		{"sips:bob@example.com", ""},
+		// No user part (host-only URI)
+		{"sip:example.com", "example.com"},
+		// Empty / no sip: prefix
+		{"SIPREC-SRS", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, sipURIUserPart(tc.input), "input: %q", tc.input)
+	}
+}
+
+func TestMetaDNIS_ANI(t *testing.T) {
+	meta, err := ParseSiprecMetadata(testSonusInviteMetadata)
+	require.NoError(t, err)
+
+	assert.Equal(t, "8777953602", metaDNIS(meta))
+	assert.Equal(t, "4694733291", metaANI(meta))
+}
+
+func TestMetaDNIS_ANI_NoCallData(t *testing.T) {
+	meta, err := ParseSiprecMetadata(testRichMetadata)
+	require.NoError(t, err)
+
+	// testRichMetadata has no callData block — helpers must return "".
+	assert.Equal(t, "", metaDNIS(meta))
+	assert.Equal(t, "", metaANI(meta))
+}
+
+func TestMetaDNIS_ANI_Nil(t *testing.T) {
+	assert.Equal(t, "", metaDNIS(nil))
+	assert.Equal(t, "", metaANI(nil))
+}

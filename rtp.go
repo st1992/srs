@@ -30,9 +30,11 @@ type rtpRecorder struct {
 }
 
 // newRTPRecorder creates and opens the .ulaw output file for a leg.
-// The filename format is: {callID}_{dnis}_{ani}_{startTimeMs}_{label}.ulaw
+// The filename format is: {callID}-{dnis}-{ani}-{startTimeMs}-{label}.ulaw
+// where '-' is the field separator and each component is sanitized so it
+// never contains '-' (component-internal '-' becomes '_').
 func newRTPRecorder(conn *net.UDPConn, recordingDir, callID, dnis, ani string, startTimeMs int64, label string, pcmuPT uint8, log *slog.Logger) (*rtpRecorder, error) {
-	name := fmt.Sprintf("%s_%s_%s_%d_%s.ulaw",
+	name := fmt.Sprintf("%s-%s-%s-%d-%s.ulaw",
 		sanitizeFileComponent(callID),
 		sanitizeFileComponent(dnis),
 		sanitizeFileComponent(ani),
@@ -111,11 +113,13 @@ func (r *rtpRecorder) Close() {
 	r.log.Info("recording finished", "packets", r.packets.Load(), "bytes", r.bytes.Load())
 }
 
-// sanitizeFileComponent replaces characters that are unsafe in file names.
+// sanitizeFileComponent replaces characters that are unsafe in file names or
+// that conflict with the '-' field separator used in recording file names.
+// '-' itself is replaced with '_' so it cannot be confused with the separator.
 func sanitizeFileComponent(s string) string {
 	repl := func(r rune) rune {
 		switch r {
-		case '/', '\\', ':', '*', '?', '"', '<', '>', '|', ' ', '@':
+		case '/', '\\', ':', '*', '?', '"', '<', '>', '|', ' ', '@', '-':
 			return '_'
 		default:
 			return r

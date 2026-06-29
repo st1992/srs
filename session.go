@@ -14,6 +14,12 @@ type recSession struct {
 	// From/To are the SIP From/To URIs of the original INVITE.
 	From string
 	To   string
+	// DNIS is the called-party number, extracted from rs-metadata call_data
+	// when available and falling back to the user part of the SIP To URI.
+	DNIS string
+	// ANI is the calling-party number, extracted from rs-metadata call_data
+	// when available and falling back to the user part of the SIP From URI.
+	ANI string
 	// Headers captures selected SIP headers from the INVITE.
 	Headers map[string]string
 	// Metadata is the parsed rs-metadata (may be nil if absent/invalid).

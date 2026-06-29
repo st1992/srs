@@ -296,6 +296,63 @@ func CreateSiprecResponse(originalInvite *sip.Request, combinedSDP string, conta
 }
 
 // =============================================================================
+// SIP URI / SIPREC metadata helpers
+// =============================================================================
+
+// sipURIUserPart extracts the user (phone/name) part from a SIP URI string.
+// It handles both bare URIs ("sip:1234@host") and angle-bracket forms
+// ("<sip:1234@host>;params"). Returns "" if no user part can be found.
+func sipURIUserPart(uri string) string {
+	// Strip surrounding whitespace and angle brackets.
+	s := strings.TrimSpace(uri)
+	if i := strings.Index(s, "sip:"); i < 0 {
+		return ""
+	} else {
+		s = s[i+4:]
+	}
+	// Take everything up to the first '@'; if absent, up to ';' or '>'.
+	if i := strings.IndexByte(s, '@'); i >= 0 {
+		return s[:i]
+	}
+	if i := strings.IndexAny(s, ";>"); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// metaDNIS returns the DNIS (called-party number) from the first group's
+// call_data in a SiprecMetadata. Returns "" when the information is absent.
+func metaDNIS(meta *SiprecMetadata) string {
+	if meta == nil {
+		return ""
+	}
+	for _, g := range meta.Groups {
+		if g.CallData != nil && g.CallData.ToHdr != "" {
+			if u := sipURIUserPart(g.CallData.ToHdr); u != "" {
+				return u
+			}
+		}
+	}
+	return ""
+}
+
+// metaANI returns the ANI (calling-party number) from the first group's
+// call_data in a SiprecMetadata. Returns "" when the information is absent.
+func metaANI(meta *SiprecMetadata) string {
+	if meta == nil {
+		return ""
+	}
+	for _, g := range meta.Groups {
+		if g.CallData != nil && g.CallData.FromHdr != "" {
+			if u := sipURIUserPart(g.CallData.FromHdr); u != "" {
+				return u
+			}
+		}
+	}
+	return ""
+}
+
+// =============================================================================
 // SIP Identifier Generation
 // =============================================================================
 

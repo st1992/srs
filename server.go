@@ -175,11 +175,22 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 	// Capture call metadata used for file naming and event timestamps.
 	// Both are derived from the same time.Now() so the Unix-millisecond
 	// component in the file name matches the ISO 8601 timestamp in the event.
+	//
+	// DNIS/ANI are initially seeded from the SIP From/To user parts as a
+	// fallback; they are overridden below once rs-metadata is parsed so we
+	// record the actual called/calling phone numbers, not the SIPREC proxy
+	// identifiers (SIPREC-SRS / SIPREC-SRC).
 	startTime := time.Now().UTC()
 	startTimeMs := startTime.UnixMilli()
 	startTimeISO := startTime.Format(time.RFC3339Nano)
-	dnis := toURI(req)
-	ani := fromURI(req)
+	dnis := sipURIUserPart(toURI(req))
+	if dnis == "" {
+		dnis = toURI(req)
+	}
+	ani := sipURIUserPart(fromURI(req))
+	if ani == "" {
+		ani = fromURI(req)
+	}
 
 	// 100 Trying
 	s.respond(tx, req, sip.StatusTrying, "Trying", nil)
@@ -212,6 +223,16 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 		} else {
 			log.Warn("failed to parse SIPREC metadata", "err", pErr)
 		}
+	}
+
+	// Override DNIS/ANI with the actual phone numbers from rs-metadata
+	// call_data when present; these are far more useful for file naming than
+	// the SIPREC proxy URIs in the SIP From/To headers.
+	if v := metaDNIS(meta); v != "" {
+		dnis = v
+	}
+	if v := metaANI(meta); v != "" {
+		ani = v
 	}
 
 	defaultLabels := []string{"inbound", "outbound"}
@@ -281,6 +302,8 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 		SourceIP:  sourceAddr(req),
 		From:      fromURI(req),
 		To:        toURI(req),
+		DNIS:      dnis,
+		ANI:       ani,
 		Headers:   collectSIPHeaders(req),
 		Metadata:  meta,
 		Legs:      recorders,
@@ -387,8 +410,9 @@ type callMetadataRecord struct {
 }
 
 // writeMetadataJSON serialises call metadata to a JSON file in the recording
-// directory and returns its path. The filename mirrors the recording naming
-// convention: {callID}_{dnis}_{ani}_{startTimeMs}.json
+// directory and returns its path. The filename shares the same stem as the
+// recording files: {callID}-{dnis}-{ani}-{startTimeMs}.json, so the JSON and
+// its matching .ulaw files can always be correlated by dropping the suffix.
 func (s *recorderServer) writeMetadataJSON(sess *recSession, endTimeISO string, byeMeta *SiprecMetadata) (string, error) {
 	record := &callMetadataRecord{
 		SIPCallID:      sess.CallID,
@@ -408,10 +432,10 @@ func (s *recorderServer) writeMetadataJSON(sess *recSession, endTimeISO string, 
 		return "", fmt.Errorf("marshal metadata: %w", err)
 	}
 
-	name := fmt.Sprintf("%s_%s_%s_%d.json",
+	name := fmt.Sprintf("%s-%s-%s-%d.json",
 		sanitizeFileComponent(sess.CallID),
-		sanitizeFileComponent(sess.To),   // DNIS
-		sanitizeFileComponent(sess.From), // ANI
+		sanitizeFileComponent(sess.DNIS),
+		sanitizeFileComponent(sess.ANI),
 		sess.CreatedAt.UnixMilli(),
 	)
 	p := filepath.Join(s.cfg.RecordingDir, name)

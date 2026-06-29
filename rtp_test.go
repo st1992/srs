@@ -76,23 +76,48 @@ func TestRTPRecorder_FileNaming(t *testing.T) {
 	require.NoError(t, err)
 
 	const startMs = int64(1750000000000)
-	rec, err := newRTPRecorder(srvConn, dir, "call/with:weird@chars", "dnis/test", "ani@test", startMs, "in bound", 0, testLogger())
+	// callID with @, /, : and - all sanitized to _; DNIS/ANI are phone numbers.
+	rec, err := newRTPRecorder(srvConn, dir, "call/with:weird@chars", "8777953602", "4694733291", startMs, "1", 0, testLogger())
 	require.NoError(t, err)
 
 	// Start the read loop so Close() can unblock cleanly on done.
 	go rec.run()
 	defer rec.Close()
 
+	// Fields are separated by '-'; within-component special chars become '_'.
 	assert.Contains(t, rec.Path(), "call_with_weird_chars")
-	assert.Contains(t, rec.Path(), "dnis_test")
-	assert.Contains(t, rec.Path(), "ani_test")
+	assert.Contains(t, rec.Path(), "8777953602")
+	assert.Contains(t, rec.Path(), "4694733291")
 	assert.Contains(t, rec.Path(), "1750000000000")
-	assert.Contains(t, rec.Path(), "in_bound.ulaw")
+	assert.Contains(t, rec.Path(), "-1.ulaw")
+	// Verify the full stem format: {callID}-{dnis}-{ani}-{ts}-{label}.ulaw
+	assert.Contains(t, rec.Path(), "call_with_weird_chars-8777953602-4694733291-1750000000000-1.ulaw")
 }
 
+func TestRTPRecorder_FileNaming_DashesInCallID(t *testing.T) {
+	dir := t.TempDir()
+
+	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	require.NoError(t, err)
+
+	const startMs = int64(1750000000000)
+	// UUID-style callID with '-'; they are sanitized to '_' so they cannot
+	// be confused with the '-' field separator.
+	rec, err := newRTPRecorder(srvConn, dir, "a1b2c3d4-e5f6@sip.example.com", "8005551234", "2125559876", startMs, "2", 0, testLogger())
+	require.NoError(t, err)
+
+	go rec.run()
+	defer rec.Close()
+
+	assert.Contains(t, rec.Path(), "a1b2c3d4_e5f6_sip.example.com-8005551234-2125559876-1750000000000-2.ulaw")
+}
 
 func TestSanitizeFileComponent(t *testing.T) {
 	assert.Equal(t, "a_b_c", sanitizeFileComponent("a/b:c"))
 	assert.Equal(t, "unknown", sanitizeFileComponent(""))
 	assert.Equal(t, "normal", sanitizeFileComponent("normal"))
+	// '-' must be replaced so it cannot clash with the '-' field separator.
+	assert.Equal(t, "a_b_c", sanitizeFileComponent("a-b-c"))
+	// '@' replacement (Call-ID host separator).
+	assert.Equal(t, "1234_10.0.0.1", sanitizeFileComponent("1234@10.0.0.1"))
 }
