@@ -13,7 +13,7 @@ import (
 func closedRecorder(label, path string) *rtpRecorder {
 	done := make(chan struct{})
 	close(done)
-	return &rtpRecorder{label: label, path: path, log: testLogger(), done: done}
+	return &rtpRecorder{label: label, sink: &fileSink{path: path, label: label}, path: path, log: testLogger(), done: done}
 }
 
 func TestSessionStore_SetGetExistsDelete(t *testing.T) {

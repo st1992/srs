@@ -15,6 +15,17 @@ data:
     # the pod inherits all of the node's network interfaces.
     sip_listen_addr: "{{ .Values.siprecRecorder.config.sipListenAddr }}"
 
+    # Pod-local HTTP API for Agent Assist start/stop.
+    http_listen_addr: "{{ .Values.siprecRecorder.config.httpListenAddr }}"
+    api_advertise_ip: "{{ .Values.siprecRecorder.config.apiAdvertiseIP }}"
+    api_auth_token: "{{ .Values.siprecRecorder.config.apiAuthToken }}"
+
+    # Redis call locator: loc:<Call ID> -> pod/node IP.
+    # Uses private plain TCP Redis with no TLS and no AUTH.
+    redis_addr: "{{ .Values.siprecRecorder.config.redisAddr }}"
+    redis_db: {{ .Values.siprecRecorder.config.redisDB }}
+    redis_locator_ttl_seconds: {{ .Values.siprecRecorder.config.redisLocatorTTLSeconds }}
+
     # Public IP advertised in SDP answers for RTP media.
     # Empty → auto-detect the node's primary non-loopback IPv4 address at startup.
     # With hostNetwork=true this correctly resolves to the physical node IP.
@@ -60,3 +71,18 @@ data:
 
     # Maximum time to wait for in-flight uploads during graceful shutdown (seconds).
     shutdown_upload_timeout_sec: {{ .Values.siprecRecorder.config.shutdownUploadTimeoutSec }}
+
+    # Google Agent Assist / Dialogflow BiDi streaming.
+    agent_assist_project_id: "{{ .Values.siprecRecorder.config.agentAssistProjectID }}"
+    agent_assist_location_id: "{{ .Values.siprecRecorder.config.agentAssistLocationID }}"
+    agent_assist_conversation_profile_id: "{{ .Values.siprecRecorder.config.agentAssistConversationProfileID }}"
+    agent_assist_sample_rate_hertz: {{ .Values.siprecRecorder.config.agentAssistSampleRateHertz }}
+    agent_assist_send_queue_packets: {{ .Values.siprecRecorder.config.agentAssistSendQueuePackets }}
+    agent_assist_end_user_labels:
+    {{ range .Values.siprecRecorder.config.agentAssistEndUserLabels }}
+      - {{ . | quote }}
+    {{- end }}
+    agent_assist_human_agent_labels:
+    {{ range .Values.siprecRecorder.config.agentAssistHumanAgentLabels }}
+      - {{ . | quote }}
+    {{- end }}

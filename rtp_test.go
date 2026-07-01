@@ -69,6 +69,42 @@ func TestRTPRecorder_WritesOnlyPCMUPayload(t *testing.T) {
 	assert.Equal(t, "abcdef", string(data))
 }
 
+func TestRTPRecorder_SwitchesSinkWithoutChangingPort(t *testing.T) {
+	dir := t.TempDir()
+
+	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	require.NoError(t, err)
+	serverAddr := srvConn.LocalAddr().(*net.UDPAddr)
+
+	rec, err := newRTPRecorder(srvConn, dir, "callX", "15551234567", "15559876543", time.Now().UnixMilli(), "inbound", 0, testLogger())
+	require.NoError(t, err)
+	go rec.run()
+
+	client, err := net.DialUDP("udp", nil, serverAddr)
+	require.NoError(t, err)
+	defer client.Close()
+
+	_, err = client.Write(rtpPacket(0, 1, []byte("before")))
+	require.NoError(t, err)
+	time.Sleep(100 * time.Millisecond)
+
+	mem := &memorySink{}
+	old := rec.ReplaceSink(mem)
+	require.NotNil(t, old)
+	require.NoError(t, old.Close())
+
+	_, err = client.Write(rtpPacket(0, 2, []byte("after")))
+	require.NoError(t, err)
+	time.Sleep(100 * time.Millisecond)
+	rec.Close()
+
+	data, err := os.ReadFile(old.Path())
+	require.NoError(t, err)
+	assert.Equal(t, "before", string(data))
+	assert.Equal(t, "after", string(mem.payload))
+	assert.Equal(t, serverAddr.Port, srvConn.LocalAddr().(*net.UDPAddr).Port)
+}
+
 func TestRTPRecorder_FileNaming(t *testing.T) {
 	dir := t.TempDir()
 

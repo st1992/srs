@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 
 	"github.com/pion/rtp"
@@ -13,15 +15,94 @@ import (
 
 const rtpReadBufferSize = 1500
 
-// rtpRecorder receives RTP for a single SIPREC leg and writes the raw payload
-// (no transcoding) of PCMU packets to a .ulaw file.
+var errSinkClosed = errors.New("rtp sink closed")
+
+type rtpSink interface {
+	WriteRTPPayload([]byte) error
+	Close() error
+	Path() string
+	Kind() string
+}
+
+type fileSink struct {
+	file  *os.File
+	path  string
+	label string
+
+	mu     sync.Mutex
+	closed bool
+}
+
+func newFileSink(recordingDir, callID, dnis, ani string, startTimeMs int64, label string) (*fileSink, error) {
+	name := fmt.Sprintf("%s-%s-%s-%d-%s.ulaw",
+		sanitizeFileComponent(callID),
+		sanitizeFileComponent(dnis),
+		sanitizeFileComponent(ani),
+		startTimeMs,
+		sanitizeFileComponent(label),
+	)
+	p := filepath.Join(recordingDir, name)
+	f, err := os.Create(p)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create recording file %q: %w", p, err)
+	}
+	return &fileSink{file: f, path: p, label: label}, nil
+}
+
+func (s *fileSink) WriteRTPPayload(payload []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.file == nil {
+		return errSinkClosed
+	}
+	_, err := s.file.Write(payload)
+	return err
+}
+
+func (s *fileSink) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.file == nil {
+		return nil
+	}
+	if err := s.file.Sync(); err != nil {
+		_ = s.file.Close()
+		s.file = nil
+		return err
+	}
+	err := s.file.Close()
+	s.file = nil
+	return err
+}
+
+func (s *fileSink) Path() string { return s.path }
+func (s *fileSink) Kind() string { return "recording" }
+
+type discardSink struct{}
+
+func (discardSink) WriteRTPPayload([]byte) error { return nil }
+func (discardSink) Close() error                 { return nil }
+func (discardSink) Path() string                 { return "" }
+func (discardSink) Kind() string                 { return "discard" }
+
+// rtpRecorder receives RTP for a single SIPREC leg and writes each valid PCMU
+// packet to the currently selected sink. The sink can be swapped at runtime
+// when a call enters or leaves Agent Assist; packets are not buffered.
 type rtpRecorder struct {
 	conn   *net.UDPConn
-	file   *os.File
-	path   string
 	label  string
 	pcmuPT uint8
 	log    *slog.Logger
+
+	mu          sync.RWMutex
+	sink        rtpSink
+	path        string
+	onSinkError func(error)
+	sinkErring  atomic.Bool
 
 	closed  atomic.Bool
 	packets atomic.Uint64
@@ -34,33 +115,56 @@ type rtpRecorder struct {
 // where '-' is the field separator and each component is sanitized so it
 // never contains '-' (component-internal '-' becomes '_').
 func newRTPRecorder(conn *net.UDPConn, recordingDir, callID, dnis, ani string, startTimeMs int64, label string, pcmuPT uint8, log *slog.Logger) (*rtpRecorder, error) {
-	name := fmt.Sprintf("%s-%s-%s-%d-%s.ulaw",
-		sanitizeFileComponent(callID),
-		sanitizeFileComponent(dnis),
-		sanitizeFileComponent(ani),
-		startTimeMs,
-		sanitizeFileComponent(label),
-	)
-	path := filepath.Join(recordingDir, name)
-
-	f, err := os.Create(path)
+	sink, err := newFileSink(recordingDir, callID, dnis, ani, startTimeMs, label)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create recording file %q: %w", path, err)
+		return nil, err
 	}
 
 	return &rtpRecorder{
 		conn:   conn,
-		file:   f,
-		path:   path,
 		label:  label,
 		pcmuPT: pcmuPT,
-		log:    log.With("label", label, "file", path),
+		log:    log.With("label", label, "file", sink.Path()),
+		sink:   sink,
+		path:   sink.Path(),
 		done:   make(chan struct{}),
 	}, nil
 }
 
 // Path returns the absolute or relative path of the .ulaw output file.
-func (r *rtpRecorder) Path() string { return r.path }
+func (r *rtpRecorder) Path() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.sink == nil {
+		return r.path
+	}
+	return r.sink.Path()
+}
+
+func (r *rtpRecorder) SinkKind() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.sink == nil {
+		return "none"
+	}
+	return r.sink.Kind()
+}
+
+// ReplaceSink switches future RTP packets to next and returns the previous
+// sink. The caller owns closing the returned sink after the swap.
+func (r *rtpRecorder) ReplaceSink(next rtpSink) rtpSink {
+	if next == nil {
+		next = discardSink{}
+	}
+	r.mu.Lock()
+	old := r.sink
+	r.sink = next
+	if next.Path() != "" {
+		r.path = next.Path()
+	}
+	r.mu.Unlock()
+	return old
+}
 
 // run reads RTP packets until the recorder is closed, writing PCMU payloads to disk.
 func (r *rtpRecorder) run() {
@@ -88,9 +192,24 @@ func (r *rtpRecorder) run() {
 			continue
 		}
 
-		if _, err := r.file.Write(pkt.Payload); err != nil {
-			r.log.Error("failed to write RTP payload", "err", err)
-			return
+		r.mu.RLock()
+		sink := r.sink
+		r.mu.RUnlock()
+		if sink != nil {
+			err = sink.WriteRTPPayload(pkt.Payload)
+		}
+		if err != nil {
+			if errors.Is(err, errSinkClosed) {
+				continue
+			}
+			r.log.Error("failed to write RTP payload", "err", err, "sink", r.SinkKind())
+			if r.onSinkError != nil && r.sinkErring.CompareAndSwap(false, true) {
+				go func() {
+					defer r.sinkErring.Store(false)
+					r.onSinkError(err)
+				}()
+			}
+			continue
 		}
 		r.packets.Add(1)
 		r.bytes.Add(uint64(len(pkt.Payload)))
@@ -105,10 +224,20 @@ func (r *rtpRecorder) Close() {
 	if r.conn != nil {
 		_ = r.conn.Close()
 	}
-	<-r.done
-	if r.file != nil {
-		_ = r.file.Sync()
-		_ = r.file.Close()
+	if r.done != nil {
+		<-r.done
+	}
+	r.mu.Lock()
+	sink := r.sink
+	r.sink = nil
+	if sink != nil && sink.Path() != "" {
+		r.path = sink.Path()
+	}
+	r.mu.Unlock()
+	if sink != nil {
+		if err := sink.Close(); err != nil {
+			r.log.Error("failed to close RTP sink", "err", err, "sink", sink.Kind())
+		}
 	}
 	r.log.Info("recording finished", "packets", r.packets.Load(), "bytes", r.bytes.Load())
 }

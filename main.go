@@ -68,7 +68,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv, err := NewServer(cfg, uploader, metaUploader, log)
+	locator, err := NewCallLocator(ctx, cfg, log)
+	if err != nil {
+		log.Error("failed to initialize call locator", "err", err)
+		os.Exit(1)
+	}
+	defer locator.Close()
+
+	assist, err := NewAgentAssistClient(ctx, cfg, log)
+	if err != nil {
+		log.Error("failed to initialize Agent Assist client", "err", err)
+		os.Exit(1)
+	}
+	defer assist.Close()
+
+	srv, err := NewServer(cfg, uploader, metaUploader, locator, assist, log)
 	if err != nil {
 		log.Error("failed to create SIPREC server", "err", err)
 		os.Exit(1)
@@ -79,6 +93,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	api := NewAPIServer(cfg, srv, log)
+	api.Start()
+
 	log.Info("siprec-recorder started")
 
 	sig := make(chan os.Signal, 1)
@@ -86,5 +103,10 @@ func main() {
 	<-sig
 
 	log.Info("shutting down")
+	apiCtx, apiCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer apiCancel()
+	if err := api.Stop(apiCtx); err != nil {
+		log.Warn("failed to stop HTTP API cleanly", "err", err)
+	}
 	srv.Stop()
 }

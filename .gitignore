@@ -51,3 +51,8 @@ service-account*.json
 
 # SIPp load test output
 sipp-load-test/logs/
+.gocache/
+.gopath/
+.gomodcache/
+.gocache-cgo0/
+.gopath-cgo0/

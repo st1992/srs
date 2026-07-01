@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	mediartpsdk "github.com/livekit/media-sdk/rtp"
@@ -16,17 +18,28 @@ import (
 	"github.com/livekit/sipgo/sip"
 )
 
+const locatorOperationTimeout = 500 * time.Millisecond
+
 // recorderServer is the minimal SIPREC recording SIP server.
 type recorderServer struct {
-	cfg          *Config
-	log          *slog.Logger
-	ua           *sipgo.UserAgent
-	srv          *sipgo.Server
-	sessions     *sessionStore
-	uploader     Uploader // audio recording (.ulaw) uploader
-	metaUploader Uploader // per-call metadata JSON uploader
-	listener     net.PacketConn
-	mediaIP      string
+	cfg            *Config
+	log            *slog.Logger
+	ua             *sipgo.UserAgent
+	srv            *sipgo.Server
+	sessions       *sessionStore
+	uploader       Uploader // audio recording (.ulaw) uploader
+	metaUploader   Uploader // per-call metadata JSON uploader
+	locator        CallLocator
+	assist         AgentAssistClient
+	listener       net.PacketConn
+	mediaIP        string
+	apiAdvertiseIP string
+	locatorTTL     time.Duration
+	leaseMu        sync.Mutex
+	leases         map[string]struct{}
+	renewerStop    chan struct{}
+	renewerDone    chan struct{}
+	renewerOnce    sync.Once
 	// sipContactHost / sipContactPort are stamped into the Contact header of
 	// every 200 OK we send. They MUST resolve back to this pod's SIP socket
 	// from the SBC's perspective, otherwise in-dialog ACK/BYE either loop
@@ -37,7 +50,7 @@ type recorderServer struct {
 
 // NewServer constructs the SIP server, registers handlers, and prepares the
 // RTP port allocator. It does not start listening until Start is called.
-func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, log *slog.Logger) (*recorderServer, error) {
+func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, locator CallLocator, assist AgentAssistClient, log *slog.Logger) (*recorderServer, error) {
 	mediaIP := cfg.MediaIP
 	if mediaIP == "" {
 		ip, err := detectMediaIP()
@@ -74,6 +87,16 @@ func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, log *slog.
 		}
 		sipHost = detected
 	}
+	apiAdvertiseIP := cfg.APIAdvertiseIP
+	if apiAdvertiseIP == "" {
+		apiAdvertiseIP = sipHost
+	}
+	if locator == nil {
+		locator = disabledLocator{reason: "not configured"}
+	}
+	if assist == nil {
+		assist = disabledAgentAssistClient{reason: "not configured"}
+	}
 
 	s := &recorderServer{
 		cfg:            cfg,
@@ -83,7 +106,14 @@ func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, log *slog.
 		sessions:       newSessionStore(),
 		uploader:       uploader,
 		metaUploader:   metaUploader,
+		locator:        locator,
+		assist:         assist,
 		mediaIP:        mediaIP,
+		apiAdvertiseIP: apiAdvertiseIP,
+		locatorTTL:     time.Duration(cfg.RedisLocatorTTLSeconds) * time.Second,
+		leases:         make(map[string]struct{}),
+		renewerStop:    make(chan struct{}),
+		renewerDone:    make(chan struct{}),
 		sipContactHost: sipHost,
 		sipContactPort: sipPort,
 	}
@@ -92,6 +122,7 @@ func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, log *slog.
 	srv.OnAck(s.onAck)
 	srv.OnBye(s.onBye)
 	srv.OnOptions(s.onOptions)
+	go s.locatorRenewLoop()
 
 	return s, nil
 }
@@ -125,18 +156,17 @@ func (s *recorderServer) Stop() {
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
+	s.stopLocatorRenewer()
 
 	shutdownTime := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, sess := range s.sessions.DrainAll() {
-		sess.Close()
-		if metaPath, err := s.writeMetadataJSON(sess, shutdownTime, nil); err != nil {
-			s.log.Error("failed to write call metadata JSON on shutdown", "err", err, "sipCallID", sess.CallID)
-		} else {
-			s.metaUploader.Enqueue(metaPath)
+		s.stopLocatorRenewal(sess.CallID)
+		locatorCtx, locatorCancel := s.locatorContext()
+		if err := s.locator.Delete(locatorCtx, sess.CallID); err != nil {
+			s.log.Warn("failed to delete call locator on shutdown", "err", err, "sipCallID", sess.CallID)
 		}
-		for _, p := range sess.RecordingFiles() {
-			s.uploader.Enqueue(p)
-		}
+		locatorCancel()
+		s.finalizeSession(sess, shutdownTime, nil, "shutdown")
 	}
 
 	timeout := time.Duration(s.cfg.ShutdownUploadTimeoutSec) * time.Second
@@ -271,6 +301,9 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 			s.respond(tx, req, sip.StatusInternalServerError, "Recording setup failed", nil)
 			return
 		}
+		rec.onSinkError = func(err error) {
+			s.fallbackFromAgentAssist(callID, err)
+		}
 
 		s.uploader.MarkActive(rec.Path())
 		recorders = append(recorders, rec)
@@ -285,6 +318,27 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 		return
 	}
 
+	locatorCtx, locatorCancel := s.locatorContext()
+	err = s.locator.Register(locatorCtx, callID, s.apiAdvertiseIP, s.locatorTTL)
+	locatorCancel()
+	if err != nil {
+		log.Error("failed to register call locator", "err", err)
+		cleanup()
+		s.respond(tx, req, sip.StatusServiceUnavailable, "Call locator unavailable", nil)
+		return
+	}
+	locatorRegistered := true
+	cleanupLocator := func() {
+		if locatorRegistered {
+			locatorCtx, locatorCancel := s.locatorContext()
+			if err := s.locator.Delete(locatorCtx, callID); err != nil {
+				log.Warn("failed to delete call locator during cleanup", "err", err)
+			}
+			locatorCancel()
+			locatorRegistered = false
+		}
+	}
+
 	// Start receiving RTP before sending the answer so we don't miss early packets.
 	for _, rec := range recorders {
 		go rec.run()
@@ -294,6 +348,7 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 	if err := tx.Respond(resp); err != nil {
 		log.Error("failed to send SIPREC 200 OK", "err", err)
 		cleanup()
+		cleanupLocator()
 		return
 	}
 
@@ -310,7 +365,10 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 		StartTime: startTimeISO,
 		CreatedAt: startTime,
 	}
+	sess.beginRecordingSegmentLocked(startTime)
 	s.sessions.Set(callID, sess)
+	s.startLocatorRenewal(callID)
+	locatorRegistered = false
 
 	log.Info("SIPREC recording established",
 		"files", sess.RecordingFiles(),
@@ -337,6 +395,12 @@ func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTr
 	if !ok {
 		return
 	}
+	s.stopLocatorRenewal(callID)
+	locatorCtx, locatorCancel := s.locatorContext()
+	if err := s.locator.Delete(locatorCtx, callID); err != nil {
+		s.log.Warn("failed to delete call locator", "err", err, "sipCallID", callID)
+	}
+	locatorCancel()
 
 	// Parse rs-metadata from the BYE body (best effort; carries disassociate-time).
 	var byeMeta *SiprecMetadata
@@ -354,21 +418,7 @@ func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTr
 		"siprec_metadata", sess.Metadata,
 		"bye_metadata", byeMeta,
 	)
-	sess.Close()
-
-	// Write per-call metadata JSON and enqueue it for upload to the metadata
-	// bucket. Errors are non-fatal; audio recording upload still proceeds.
-	if metaPath, err := s.writeMetadataJSON(sess, endTimeISO, byeMeta); err != nil {
-		s.log.Error("failed to write call metadata JSON", "err", err, "sipCallID", callID)
-	} else {
-		s.metaUploader.Enqueue(metaPath)
-		s.log.Info("enqueued call metadata JSON for upload", "file", metaPath)
-	}
-
-	// Recording files are now closed; upload them (and delete locally on success).
-	for _, p := range sess.RecordingFiles() {
-		s.uploader.Enqueue(p)
-	}
+	s.finalizeSession(sess, endTimeISO, byeMeta, "bye")
 }
 
 // onOptions answers OPTIONS pings.
@@ -379,6 +429,293 @@ func (s *recorderServer) onOptions(_ *slog.Logger, req *sip.Request, tx sip.Serv
 	if err := tx.Respond(resp); err != nil {
 		s.log.Error("failed to respond to OPTIONS", "err", err)
 	}
+}
+
+type agentAssistResult struct {
+	CallID         string
+	ConversationID string
+	State          sessionMode
+}
+
+func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, metadata map[string]any) (*agentAssistResult, error) {
+	sess, ok := s.sessions.Get(callID)
+	if !ok {
+		return nil, errCallNotFound
+	}
+
+	sess.mu.Lock()
+	if sess.Mode == sessionModeAgentAssist && sess.AgentAssist != nil {
+		result := &agentAssistResult{CallID: callID, ConversationID: sess.AgentAssist.ConversationID, State: sess.Mode}
+		sess.mu.Unlock()
+		return result, nil
+	}
+	if sess.Mode != sessionModeRecording {
+		state := sess.Mode
+		sess.mu.Unlock()
+		return nil, fmt.Errorf("%w: cannot start agent assist from state %s", errInvalidTransition, state)
+	}
+	labels := make([]string, 0, len(sess.Legs))
+	for _, leg := range sess.Legs {
+		labels = append(labels, leg.label)
+	}
+	sess.mu.Unlock()
+
+	run, err := s.assist.Start(ctx, AgentAssistStartRequest{
+		CallID:        callID,
+		Metadata:      metadata,
+		Labels:        labels,
+		OnStreamError: func(err error) { s.fallbackFromAgentAssist(callID, err) },
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var oldSinks []rtpSink
+	var completed *callSegment
+	now := time.Now().UTC()
+
+	sess.mu.Lock()
+	if sess.Mode != sessionModeRecording {
+		state := sess.Mode
+		sess.mu.Unlock()
+		_ = run.complete(context.Background())
+		return nil, fmt.Errorf("%w: cannot start agent assist from state %s", errInvalidTransition, state)
+	}
+	for _, leg := range sess.Legs {
+		next, ok := run.Sinks[leg.label]
+		if !ok {
+			sess.mu.Unlock()
+			_ = run.complete(context.Background())
+			return nil, fmt.Errorf("agent assist stream missing for label %s", leg.label)
+		}
+		oldSinks = append(oldSinks, leg.ReplaceSink(next))
+	}
+	if sess.CurrentSegment != nil {
+		sess.CurrentSegment.RequestMetadata = metadata
+	}
+	completed = sess.completeCurrentSegmentLocked(now, "agent_assist_start")
+	sess.Mode = sessionModeAgentAssist
+	sess.AgentAssist = run
+	sess.CurrentSegment = &callSegment{
+		Sequence:        sess.SegmentSeq,
+		Mode:            sessionModeAgentAssist,
+		StartTime:       now.Format(time.RFC3339Nano),
+		RequestMetadata: metadata,
+		ConversationID:  run.ConversationID,
+	}
+	sess.SegmentSeq++
+	sess.mu.Unlock()
+
+	for _, sink := range oldSinks {
+		if sink == nil {
+			continue
+		}
+		if err := sink.Close(); err != nil {
+			s.log.Error("failed to close pre-agent-assist recording sink", "err", err, "sipCallID", callID, "file", sink.Path())
+		}
+		if p := sink.Path(); p != "" {
+			s.uploader.Enqueue(p)
+		}
+	}
+	if completed != nil {
+		if metaPath, err := s.writeSegmentMetadataJSON(sess, completed, nil); err != nil {
+			s.log.Error("failed to write pre-agent-assist metadata JSON", "err", err, "sipCallID", callID)
+		} else {
+			s.metaUploader.Enqueue(metaPath)
+		}
+	}
+
+	return &agentAssistResult{CallID: callID, ConversationID: run.ConversationID, State: sessionModeAgentAssist}, nil
+}
+
+func (s *recorderServer) StopAgentAssist(ctx context.Context, callID string) (*agentAssistResult, error) {
+	return s.stopAgentAssist(ctx, callID, "agent_assist_stop", "")
+}
+
+func (s *recorderServer) stopAgentAssist(ctx context.Context, callID, reason, errText string) (*agentAssistResult, error) {
+	sess, ok := s.sessions.Get(callID)
+	if !ok {
+		return nil, errCallNotFound
+	}
+
+	now := time.Now().UTC()
+	newSinks := make(map[string]*fileSink, len(sess.Legs))
+
+	sess.mu.Lock()
+	if sess.Mode == sessionModeRecording {
+		result := &agentAssistResult{CallID: callID, State: sess.Mode}
+		if sess.AgentAssist != nil {
+			result.ConversationID = sess.AgentAssist.ConversationID
+		}
+		sess.mu.Unlock()
+		return result, nil
+	}
+	if sess.Mode != sessionModeAgentAssist || sess.AgentAssist == nil {
+		state := sess.Mode
+		sess.mu.Unlock()
+		return nil, fmt.Errorf("%w: cannot stop agent assist from state %s", errInvalidTransition, state)
+	}
+
+	for _, leg := range sess.Legs {
+		sink, err := newFileSink(s.cfg.RecordingDir, sess.CallID, sess.DNIS, sess.ANI, now.UnixMilli(), leg.label)
+		if err != nil {
+			sess.mu.Unlock()
+			for _, created := range newSinks {
+				_ = created.Close()
+			}
+			return nil, err
+		}
+		s.uploader.MarkActive(sink.Path())
+		newSinks[leg.label] = sink
+	}
+
+	var oldSinks []rtpSink
+	for _, leg := range sess.Legs {
+		oldSinks = append(oldSinks, leg.ReplaceSink(newSinks[leg.label]))
+	}
+	if sess.CurrentSegment != nil && errText != "" {
+		sess.CurrentSegment.Error = errText
+	}
+	completed := sess.completeCurrentSegmentLocked(now, reason)
+	run := sess.AgentAssist
+	sess.AgentAssist = nil
+	sess.beginRecordingSegmentLocked(now)
+	sess.mu.Unlock()
+
+	for _, sink := range oldSinks {
+		if sink != nil {
+			if err := sink.Close(); err != nil {
+				s.log.Error("failed to close agent assist sink", "err", err, "sipCallID", callID)
+			}
+		}
+	}
+	if err := run.complete(context.Background()); err != nil {
+		s.log.Error("failed to complete agent assist conversation", "err", err, "sipCallID", callID, "conversationID", run.ConversationID)
+	}
+	if completed != nil {
+		if metaPath, err := s.writeSegmentMetadataJSON(sess, completed, nil); err != nil {
+			s.log.Error("failed to write agent-assist metadata JSON", "err", err, "sipCallID", callID)
+		} else {
+			s.metaUploader.Enqueue(metaPath)
+		}
+	}
+
+	return &agentAssistResult{CallID: callID, ConversationID: run.ConversationID, State: sessionModeRecording}, nil
+}
+
+func (s *recorderServer) fallbackFromAgentAssist(callID string, cause error) {
+	if cause == nil {
+		return
+	}
+	if _, err := s.stopAgentAssist(context.Background(), callID, "agent_assist_error", cause.Error()); err != nil {
+		if !errors.Is(err, errCallNotFound) && !errors.Is(err, errInvalidTransition) {
+			s.log.Error("failed to fall back from Agent Assist to recording", "err", err, "sipCallID", callID, "cause", cause)
+		}
+	}
+}
+
+func (s *recorderServer) finalizeSession(sess *recSession, endTimeISO string, byeMeta *SiprecMetadata, reason string) {
+	endTime, err := time.Parse(time.RFC3339Nano, endTimeISO)
+	if err != nil {
+		endTime = time.Now().UTC()
+	}
+
+	sess.mu.Lock()
+	completed := sess.completeCurrentSegmentLocked(endTime, reason)
+	if completed != nil && sess.AgentAssist != nil {
+		completed.ConversationID = sess.AgentAssist.ConversationID
+	}
+	run := sess.AgentAssist
+	sess.AgentAssist = nil
+	sess.Mode = sessionModeClosed
+	sess.mu.Unlock()
+
+	sess.Close()
+	if run != nil {
+		if err := run.complete(context.Background()); err != nil {
+			s.log.Error("failed to complete agent assist conversation", "err", err, "sipCallID", sess.CallID, "conversationID", run.ConversationID)
+		}
+	}
+
+	if completed == nil {
+		return
+	}
+	if metaPath, err := s.writeSegmentMetadataJSON(sess, completed, byeMeta); err != nil {
+		s.log.Error("failed to write call metadata JSON", "err", err, "sipCallID", sess.CallID)
+	} else {
+		s.metaUploader.Enqueue(metaPath)
+		s.log.Info("enqueued call metadata JSON for upload", "file", metaPath)
+	}
+	for _, p := range completed.RecordingFiles {
+		s.uploader.Enqueue(p)
+	}
+}
+
+func (s *recorderServer) startLocatorRenewal(callID string) {
+	s.leaseMu.Lock()
+	s.leases[callID] = struct{}{}
+	s.leaseMu.Unlock()
+}
+
+func (s *recorderServer) stopLocatorRenewal(callID string) {
+	s.leaseMu.Lock()
+	delete(s.leases, callID)
+	s.leaseMu.Unlock()
+}
+
+func (s *recorderServer) locatorContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), locatorOperationTimeout)
+}
+
+func (s *recorderServer) locatorRenewLoop() {
+	defer close(s.renewerDone)
+	ttl := s.locatorTTL
+	if ttl <= 0 {
+		return
+	}
+	interval := ttl / 2
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.renewerStop:
+			return
+		case <-ticker.C:
+			callIDs := s.activeLocatorCallIDs()
+			if len(callIDs) == 0 {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			err := s.locator.RenewMany(ctx, callIDs, ttl)
+			cancel()
+			if err != nil {
+				s.log.Warn("failed to renew call locators", "err", err, "count", len(callIDs))
+			}
+		}
+	}
+}
+
+func (s *recorderServer) activeLocatorCallIDs() []string {
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	callIDs := make([]string, 0, len(s.leases))
+	for callID := range s.leases {
+		callIDs = append(callIDs, callID)
+	}
+	return callIDs
+}
+
+func (s *recorderServer) stopLocatorRenewer() {
+	if s.renewerStop == nil {
+		return
+	}
+	s.renewerOnce.Do(func() {
+		close(s.renewerStop)
+		<-s.renewerDone
+	})
 }
 
 // respond is a small helper to build and send a response with an optional body.
@@ -407,6 +744,7 @@ type callMetadataRecord struct {
 	SIPHeaders     map[string]string `json:"sip_headers,omitempty"`
 	InviteMetadata *SiprecMetadata   `json:"invite_metadata,omitempty"`
 	ByeMetadata    *SiprecMetadata   `json:"bye_metadata,omitempty"`
+	Segment        *callSegment      `json:"segment,omitempty"`
 }
 
 // writeMetadataJSON serialises call metadata to a JSON file in the recording
@@ -414,17 +752,32 @@ type callMetadataRecord struct {
 // recording files: {callID}-{dnis}-{ani}-{startTimeMs}.json, so the JSON and
 // its matching .ulaw files can always be correlated by dropping the suffix.
 func (s *recorderServer) writeMetadataJSON(sess *recSession, endTimeISO string, byeMeta *SiprecMetadata) (string, error) {
+	seg := &callSegment{
+		Sequence:       0,
+		Mode:           sessionModeRecording,
+		StartTime:      sess.StartTime,
+		EndTime:        endTimeISO,
+		RecordingFiles: sess.RecordingFiles(),
+	}
+	return s.writeSegmentMetadataJSON(sess, seg, byeMeta)
+}
+
+func (s *recorderServer) writeSegmentMetadataJSON(sess *recSession, seg *callSegment, byeMeta *SiprecMetadata) (string, error) {
+	if seg == nil {
+		return "", fmt.Errorf("missing metadata segment")
+	}
 	record := &callMetadataRecord{
 		SIPCallID:      sess.CallID,
 		From:           sess.From,
 		To:             sess.To,
 		SourceIP:       sess.SourceIP,
-		StartTime:      sess.StartTime,
-		EndTime:        endTimeISO,
-		RecordingFiles: sess.RecordingFiles(),
+		StartTime:      seg.StartTime,
+		EndTime:        seg.EndTime,
+		RecordingFiles: seg.RecordingFiles,
 		SIPHeaders:     sess.Headers,
 		InviteMetadata: sess.Metadata,
 		ByeMetadata:    byeMeta,
+		Segment:        seg,
 	}
 
 	data, err := json.MarshalIndent(record, "", "  ")
@@ -432,11 +785,13 @@ func (s *recorderServer) writeMetadataJSON(sess *recSession, endTimeISO string, 
 		return "", fmt.Errorf("marshal metadata: %w", err)
 	}
 
-	name := fmt.Sprintf("%s-%s-%s-%d.json",
+	name := fmt.Sprintf("%s-%s-%s-%d-seg%03d-%s.json",
 		sanitizeFileComponent(sess.CallID),
 		sanitizeFileComponent(sess.DNIS),
 		sanitizeFileComponent(sess.ANI),
 		sess.CreatedAt.UnixMilli(),
+		seg.Sequence,
+		sanitizeFileComponent(string(seg.Mode)),
 	)
 	p := filepath.Join(s.cfg.RecordingDir, name)
 	if err := os.WriteFile(p, data, 0o644); err != nil {

@@ -333,6 +333,7 @@ kubectl taint node ${RECORDER_NODE} siprec-role=recorder:NoSchedule-
 | `siprecRecorder.resources.limits.cpu` | `2000m` | CPU limit |
 | `siprecRecorder.resources.limits.memory` | `11Gi` | Memory limit |
 | `siprecRecorder.recordingsHostPath` | `/var/lib/siprec/recordings` | Node-local recording staging path |
+| `siprecRecorder.apiPort` | `8080` | Host-networked pod-local Agent Assist API port |
 | `siprecRecorder.service.type` | `LoadBalancer` | Service type fronting SIP |
 | `siprecRecorder.service.port` | `5060` | SIP port |
 | `siprecRecorder.service.loadBalancerIP` | `100.73.16.5` | Pre-reserved shared LB VIP |
@@ -342,3 +343,8 @@ kubectl taint node ${RECORDER_NODE} siprec-role=recorder:NoSchedule-
 | `siprecRecorder.config.rtpPortEnd` | `30000` | RTP port range end |
 | `siprecRecorder.config.gcsBucket` | `cx-siprec-audio-raw` | GCS bucket for recordings |
 | `siprecRecorder.config.gcsMetadataBucket` | `cx-siprec-metadata` | GCS bucket for per-call metadata |
+| `siprecRecorder.config.redisAddr` | `redis:6379` | Redis endpoint for `loc:<Call ID>` ownership keys |
+| `siprecRecorder.config.httpListenAddr` | `0.0.0.0:8080` | Pod-local Agent Assist API listen address |
+| `siprecRecorder.config.agentAssistProjectID` | empty | Google Cloud project for Agent Assist |
+| `siprecRecorder.config.agentAssistConversationProfileID` | empty | Agent Assist conversation profile ID |
+| `siprecRecorder.config.agentAssistSendQueuePackets` | `250` | Per-leg bounded queue depth for async Agent Assist sends |

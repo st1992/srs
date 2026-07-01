@@ -61,22 +61,55 @@ type Config struct {
 	// ShutdownUploadTimeoutSec bounds how long shutdown waits for in-flight
 	// uploads to drain. Defaults to 30 seconds.
 	ShutdownUploadTimeoutSec int `yaml:"shutdown_upload_timeout_sec"`
+
+	// HTTPListenAddr is the pod-local HTTP API listen address for operational
+	// APIs such as Agent Assist start/stop.
+	HTTPListenAddr string `yaml:"http_listen_addr"`
+
+	// APIAdvertiseIP is the IP stored in Redis loc:<Call-ID>. If empty, the
+	// recorder uses the same non-loopback address detection as SIP Contact.
+	APIAdvertiseIP string `yaml:"api_advertise_ip"`
+
+	// APIAuthToken optionally protects the pod-local HTTP API with a bearer token.
+	APIAuthToken string `yaml:"api_auth_token"`
+
+	// Redis settings used for call-location registration. Redis is expected to
+	// be reachable on a private IP/plain TCP port with no TLS and no AUTH.
+	RedisAddr              string `yaml:"redis_addr"`
+	RedisDB                int    `yaml:"redis_db"`
+	RedisLocatorTTLSeconds int    `yaml:"redis_locator_ttl_seconds"`
+
+	// Agent Assist / Dialogflow configuration.
+	AgentAssistProjectID             string   `yaml:"agent_assist_project_id"`
+	AgentAssistLocationID            string   `yaml:"agent_assist_location_id"`
+	AgentAssistConversationProfileID string   `yaml:"agent_assist_conversation_profile_id"`
+	AgentAssistSampleRateHertz       int      `yaml:"agent_assist_sample_rate_hertz"`
+	AgentAssistSendQueuePackets      int      `yaml:"agent_assist_send_queue_packets"`
+	AgentAssistEndUserLabels         []string `yaml:"agent_assist_end_user_labels"`
+	AgentAssistHumanAgentLabels      []string `yaml:"agent_assist_human_agent_labels"`
 }
 
 // DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		SIPListenAddr:            "0.0.0.0:5060",
-		RTPPortStart:             10000,
-		RTPPortEnd:               11000,
-		RecordingDir:             ".",
-		GCSObjectPrefix:          "recordings",
-		GCSMetadataObjectPrefix:  "metadata",
-		DeleteAfterUpload:        true,
-		UploadWorkers:            2,
-		UploadMaxRetries:         5,
-		UploadSweepIntervalSec:   60,
-		ShutdownUploadTimeoutSec: 30,
+		SIPListenAddr:               "0.0.0.0:5060",
+		RTPPortStart:                10000,
+		RTPPortEnd:                  11000,
+		RecordingDir:                ".",
+		GCSObjectPrefix:             "recordings",
+		GCSMetadataObjectPrefix:     "metadata",
+		DeleteAfterUpload:           true,
+		UploadWorkers:               2,
+		UploadMaxRetries:            5,
+		UploadSweepIntervalSec:      60,
+		ShutdownUploadTimeoutSec:    30,
+		HTTPListenAddr:              "0.0.0.0:8080",
+		RedisLocatorTTLSeconds:      3600,
+		AgentAssistLocationID:       "global",
+		AgentAssistSampleRateHertz:  8000,
+		AgentAssistSendQueuePackets: 250,
+		AgentAssistEndUserLabels:    []string{"inbound", "1"},
+		AgentAssistHumanAgentLabels: []string{"outbound", "2"},
 	}
 }
 
@@ -114,6 +147,18 @@ func (c *Config) Validate() error {
 	}
 	if c.RecordingDir == "" {
 		return fmt.Errorf("recording_dir must be set")
+	}
+	if c.HTTPListenAddr == "" {
+		return fmt.Errorf("http_listen_addr must be set")
+	}
+	if c.RedisLocatorTTLSeconds <= 0 {
+		return fmt.Errorf("redis_locator_ttl_seconds must be positive")
+	}
+	if c.AgentAssistSampleRateHertz <= 0 {
+		return fmt.Errorf("agent_assist_sample_rate_hertz must be positive")
+	}
+	if c.AgentAssistSendQueuePackets <= 0 {
+		return fmt.Errorf("agent_assist_send_queue_packets must be positive")
 	}
 	return nil
 }

@@ -1,9 +1,51 @@
 package main
 
 import (
+	"context"
 	"sync"
 	"time"
 )
+
+type sessionMode string
+
+const (
+	sessionModeRecording   sessionMode = "recording"
+	sessionModeAgentAssist sessionMode = "agent_assist"
+	sessionModeClosed      sessionMode = "closed"
+)
+
+type callSegment struct {
+	Sequence        int               `json:"sequence"`
+	Mode            sessionMode       `json:"mode"`
+	StartTime       string            `json:"start_time"`
+	EndTime         string            `json:"end_time,omitempty"`
+	RecordingFiles  map[string]string `json:"recording_files,omitempty"`
+	RequestMetadata map[string]any    `json:"request_metadata,omitempty"`
+	ConversationID  string            `json:"agent_assist_conversation_id,omitempty"`
+	StopReason      string            `json:"stop_reason,omitempty"`
+	Error           string            `json:"error,omitempty"`
+}
+
+type agentAssistRun struct {
+	ConversationID string
+	Sinks          map[string]rtpSink
+	Complete       func(context.Context) error
+}
+
+func (r *agentAssistRun) complete(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	for _, sink := range r.Sinks {
+		if sink != nil {
+			_ = sink.Close()
+		}
+	}
+	if r.Complete == nil {
+		return nil
+	}
+	return r.Complete(ctx)
+}
 
 // recSession tracks a single SIPREC recording call and its two media legs.
 type recSession struct {
@@ -34,17 +76,62 @@ type recSession struct {
 
 	CreatedAt time.Time
 
+	Mode              sessionMode
+	SegmentSeq        int
+	CurrentSegment    *callSegment
+	CompletedSegments []*callSegment
+	AgentAssist       *agentAssistRun
+
 	mu     sync.Mutex
 	closed bool
 }
 
 // RecordingFiles returns a map of leg label -> recording file path.
 func (s *recSession) RecordingFiles() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.CurrentSegment != nil && len(s.CurrentSegment.RecordingFiles) > 0 {
+		files := make(map[string]string, len(s.CurrentSegment.RecordingFiles))
+		for label, p := range s.CurrentSegment.RecordingFiles {
+			files[label] = p
+		}
+		return files
+	}
+	return s.recordingFilesLocked()
+}
+
+func (s *recSession) recordingFilesLocked() map[string]string {
 	files := make(map[string]string, len(s.Legs))
 	for _, leg := range s.Legs {
-		files[leg.label] = leg.Path()
+		if leg.SinkKind() == "recording" {
+			files[leg.label] = leg.Path()
+		}
 	}
 	return files
+}
+
+func (s *recSession) beginRecordingSegmentLocked(start time.Time) {
+	s.Mode = sessionModeRecording
+	s.CurrentSegment = &callSegment{
+		Sequence:       s.SegmentSeq,
+		Mode:           sessionModeRecording,
+		StartTime:      start.UTC().Format(time.RFC3339Nano),
+		RecordingFiles: s.recordingFilesLocked(),
+	}
+	s.SegmentSeq++
+}
+
+func (s *recSession) completeCurrentSegmentLocked(end time.Time, reason string) *callSegment {
+	seg := s.CurrentSegment
+	if seg == nil {
+		return nil
+	}
+	completed := *seg
+	completed.EndTime = end.UTC().Format(time.RFC3339Nano)
+	completed.StopReason = reason
+	s.CompletedSegments = append(s.CompletedSegments, &completed)
+	s.CurrentSegment = nil
+	return &completed
 }
 
 // Close shuts down all leg recorders exactly once.

@@ -21,6 +21,15 @@ recording_dir: "/tmp/recordings"
 gcs_bucket: "my-recordings"
 gcs_metadata_bucket: "my-metadata"
 gcs_metadata_object_prefix: "calls"
+http_listen_addr: "0.0.0.0:9090"
+api_advertise_ip: "10.1.2.4"
+redis_addr: "redis:6379"
+redis_locator_ttl_seconds: 120
+agent_assist_project_id: "project-1"
+agent_assist_location_id: "us-central1"
+agent_assist_conversation_profile_id: "profile-1"
+agent_assist_sample_rate_hertz: 8000
+agent_assist_send_queue_packets: 100
 `
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 
@@ -35,6 +44,14 @@ gcs_metadata_object_prefix: "calls"
 	assert.Equal(t, "my-recordings", cfg.GCSBucket)
 	assert.Equal(t, "my-metadata", cfg.GCSMetadataBucket)
 	assert.Equal(t, "calls", cfg.GCSMetadataObjectPrefix)
+	assert.Equal(t, "0.0.0.0:9090", cfg.HTTPListenAddr)
+	assert.Equal(t, "10.1.2.4", cfg.APIAdvertiseIP)
+	assert.Equal(t, "redis:6379", cfg.RedisAddr)
+	assert.Equal(t, 120, cfg.RedisLocatorTTLSeconds)
+	assert.Equal(t, "project-1", cfg.AgentAssistProjectID)
+	assert.Equal(t, "us-central1", cfg.AgentAssistLocationID)
+	assert.Equal(t, "profile-1", cfg.AgentAssistConversationProfileID)
+	assert.Equal(t, 100, cfg.AgentAssistSendQueuePackets)
 }
 
 func TestLoadConfig_AppliesDefaults(t *testing.T) {

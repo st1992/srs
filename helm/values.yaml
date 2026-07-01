@@ -65,6 +65,10 @@ siprecRecorder:
   # The directory is created automatically (type: DirectoryOrCreate).
   recordingsHostPath: /var/lib/siprec/recordings
 
+  # Pod-local HTTP API port exposed on the recorder node via hostNetwork.
+  # API clients use Redis loc:<Call ID> to choose the owning pod/node IP.
+  apiPort: 8080
+
   # ── Service fronting the DaemonSet ─────────────────────────────────────────
   # GKE Internal Passthrough Network Load Balancer (L4) that accepts inbound
   # SIPREC traffic from SBCs / call controllers on UDP/5060 and forwards it
@@ -142,6 +146,16 @@ siprecRecorder:
   # ── Recorder config (rendered into /app/config.yaml inside the pod) ────────
   config:
     sipListenAddr: "0.0.0.0:5060"
+    httpListenAddr: "0.0.0.0:8080"
+    apiAdvertiseIP: ""
+    apiAuthToken: ""
+
+    # Redis call locator. Point this at the private Redis IP/plain TCP port.
+    # No TLS or AUTH is used. Each accepted SIPREC INVITE stores loc:<Call ID>
+    # with this pod/node IP so start/stop API clients route to the owner.
+    redisAddr: "redis:6379"
+    redisDB: 0
+    redisLocatorTTLSeconds: 3600
 
     # Address stamped into the SDP "c=" line of the 200 OK answer — i.e. the
     # IP the SBC will send RTP to. We deliberately advertise the shared
@@ -186,3 +200,16 @@ siprecRecorder:
     uploadMaxRetries: 5
     uploadSweepIntervalSec: 60
     shutdownUploadTimeoutSec: 30
+
+    # Google Agent Assist / Dialogflow BiDi streaming.
+    agentAssistProjectID: ""
+    agentAssistLocationID: "global"
+    agentAssistConversationProfileID: ""
+    agentAssistSampleRateHertz: 8000
+    agentAssistSendQueuePackets: 250
+    agentAssistEndUserLabels:
+      - inbound
+      - "1"
+    agentAssistHumanAgentLabels:
+      - outbound
+      - "2"

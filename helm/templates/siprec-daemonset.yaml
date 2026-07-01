@@ -101,6 +101,11 @@ spec:
               hostPort: 5060
               protocol: UDP
 
+            - name: http-api
+              containerPort: {{ .Values.siprecRecorder.apiPort }}
+              hostPort: {{ .Values.siprecRecorder.apiPort }}
+              protocol: TCP
+
             # RTP range — declared here for documentation; Kubernetes does not
             # map large ranges in Service objects, but with hostNetwork=true
             # the ports are directly accessible on the node IP.
