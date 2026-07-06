@@ -57,6 +57,9 @@ siprecRecorder:
       # Reserve with --purpose=SHARED_LOADBALANCER_VIP if an out-of-band RTP
       # forwarding rule will share this address with the SIP Service.
       loadBalancerIP: "100.73.16.5"
+    - name: recorder-2
+      hostname: replace-with-recorder-node-hostname
+      loadBalancerIP: "100.73.16.6"
 
   # ── Resource claim ──────────────────────────────────────────────────────────
   # Node allocatable: 3920m CPU / ~12.96 GiB (13591716Ki).
