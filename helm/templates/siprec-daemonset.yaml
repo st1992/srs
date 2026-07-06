@@ -1,46 +1,57 @@
+{{- $root := . }}
+{{ range $index, $node := $root.Values.siprecRecorder.nodes }}
+{{ $nodeCtx := dict "root" $root "node" $node }}
+{{ if $index }}
+---
+{{ end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "siprec.fullname" . }}
-  namespace: {{ include "siprec-stack.namespace" . }}
+  name: {{ include "siprec.nodeFullname" $nodeCtx }}
+  namespace: {{ include "siprec-stack.namespace" $root }}
   labels:
-    {{- include "siprec.labels" . | nindent 4 }}
+    {{- include "siprec.labels" $root | nindent 4 }}
+    siprec-stack/recorder-node: {{ include "siprec.nodeName" $node | quote }}
   annotations:
     siprec-stack/role: "siprec-recorder"
-    siprec-stack/scaling: "one-pod-per-recorder-node"
+    siprec-stack/scaling: "one-daemonset-per-recorder-node"
 spec:
   selector:
     matchLabels:
-      {{- include "siprec.selectorLabels" . | nindent 6 }}
+      {{- include "siprec.nodeSelectorLabels" $nodeCtx | nindent 6 }}
 
   updateStrategy:
-    type: {{ .Values.siprecRecorder.updateStrategy.type }}
-    {{- if eq .Values.siprecRecorder.updateStrategy.type "RollingUpdate" }}
+    type: {{ $root.Values.siprecRecorder.updateStrategy.type }}
+    {{- if eq $root.Values.siprecRecorder.updateStrategy.type "RollingUpdate" }}
     rollingUpdate:
-      maxUnavailable: {{ .Values.siprecRecorder.updateStrategy.rollingUpdate.maxUnavailable }}
+      maxUnavailable: {{ $root.Values.siprecRecorder.updateStrategy.rollingUpdate.maxUnavailable }}
     {{- end }}
 
   template:
     metadata:
       labels:
-        {{- include "siprec.labels" . | nindent 8 }}
+        {{- include "siprec.labels" $root | nindent 8 }}
+        siprec-stack/recorder-node: {{ include "siprec.nodeName" $node | quote }}
       annotations:
         # Restart pods when config.yaml changes.
-        checksum/siprec-config: {{ include (print $.Template.BasePath "/siprec-configmap.yaml") . | sha256sum }}
+        checksum/siprec-config: {{ printf "%s:%s:%s" (toJson $root.Values.siprecRecorder.config) (required (printf "siprecRecorder.nodes[%d].loadBalancerIP is required" $index) $node.loadBalancerIP) (toJson $root.Values.siprecRecorder.gcp.credentialsSecret) | sha256sum }}
     spec:
       # ── Node placement ────────────────────────────────────────────────────
-      # Schedule exclusively on nodes labelled siprec-role=recorder.
+      # Schedule exclusively on the configured recorder node.
       # Tainting those nodes ensures no other user workloads land there:
       #   kubectl taint node <node> siprec-role=recorder:NoSchedule
       nodeSelector:
-        {{- toYaml .Values.siprecRecorder.nodeSelector | nindent 8 }}
+{{ with $root.Values.siprecRecorder.nodeSelector }}
+{{ toYaml . | nindent 8 }}
+{{ end }}
+        kubernetes.io/hostname: {{ required (printf "siprecRecorder.nodes[%d].hostname is required" $index) $node.hostname | quote }}
       tolerations:
-        {{- toYaml .Values.siprecRecorder.tolerations | nindent 8 }}
+        {{- toYaml $root.Values.siprecRecorder.tolerations | nindent 8 }}
 
       # ── GCP identity ──────────────────────────────────────────────────────
       # The ServiceAccount provides Workload Identity (Option A) or is simply
       # required when mounting a credentials Secret (Option B).
-      serviceAccountName: {{ include "siprec.serviceAccountName" . }}
+      serviceAccountName: {{ include "siprec.serviceAccountName" $root }}
 
       # ── Host network ──────────────────────────────────────────────────────
       # RTP media is sent directly to/from the node's IP without any NAT or
@@ -81,8 +92,8 @@ spec:
 
       containers:
         - name: siprec-recorder
-          image: "{{ .Values.siprecRecorder.image.repository }}:{{ .Values.siprecRecorder.image.tag }}"
-          imagePullPolicy: {{ .Values.siprecRecorder.image.pullPolicy }}
+          image: "{{ $root.Values.siprecRecorder.image.repository }}:{{ $root.Values.siprecRecorder.image.tag }}"
+          imagePullPolicy: {{ $root.Values.siprecRecorder.image.pullPolicy }}
 
           # ── Resource claim ────────────────────────────────────────────────
           # requests should be close to the node's total allocatable capacity
@@ -93,7 +104,7 @@ spec:
           #   siprecRecorder.resources.requests.cpu / memory
           #   siprecRecorder.resources.limits.cpu   / memory
           resources:
-            {{- toYaml .Values.siprecRecorder.resources | nindent 12 }}
+            {{- toYaml $root.Values.siprecRecorder.resources | nindent 12 }}
 
           ports:
             - name: sip-udp
@@ -105,8 +116,8 @@ spec:
             # map large ranges in Service objects, but with hostNetwork=true
             # the ports are directly accessible on the node IP.
             - name: rtp-start
-              containerPort: {{ .Values.siprecRecorder.config.rtpPortStart }}
-              hostPort: {{ .Values.siprecRecorder.config.rtpPortStart }}
+              containerPort: {{ $root.Values.siprecRecorder.config.rtpPortStart }}
+              hostPort: {{ $root.Values.siprecRecorder.config.rtpPortStart }}
               protocol: UDP
 
           # ── Health probes ──────────────────────────────────────────────────
@@ -143,7 +154,7 @@ spec:
             # recordings survive pod restarts and can be re-uploaded on next start.
             - name: recordings
               mountPath: /app/recordings
-            {{- if .Values.siprecRecorder.gcp.credentialsSecret.name }}
+            {{- if $root.Values.siprecRecorder.gcp.credentialsSecret.name }}
             # Option B: JSON key mounted from a Kubernetes Secret.
             - name: gcp-credentials
               mountPath: /var/secrets/google
@@ -153,16 +164,17 @@ spec:
       volumes:
         - name: siprec-config
           configMap:
-            name: {{ include "siprec.fullname" . }}-config
+            name: {{ include "siprec.nodeFullname" $nodeCtx }}-config
         - name: recordings
           hostPath:
             # Created automatically by the kubelet if it does not exist.
-            path: {{ .Values.siprecRecorder.recordingsHostPath }}
+            path: {{ $root.Values.siprecRecorder.recordingsHostPath }}
             type: DirectoryOrCreate
-        {{- if .Values.siprecRecorder.gcp.credentialsSecret.name }}
+        {{- if $root.Values.siprecRecorder.gcp.credentialsSecret.name }}
         # Option B: Secret volume — created separately by the operator:
         #   kubectl create secret generic <name> --from-file=key.json=./sa-key.json
         - name: gcp-credentials
           secret:
-            secretName: {{ .Values.siprecRecorder.gcp.credentialsSecret.name }}
+            secretName: {{ $root.Values.siprecRecorder.gcp.credentialsSecret.name }}
         {{- end }}
+{{ end }}

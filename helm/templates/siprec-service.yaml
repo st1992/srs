@@ -1,38 +1,45 @@
+{{- $root := . }}
+{{ range $index, $node := $root.Values.siprecRecorder.nodes }}
+{{ $nodeCtx := dict "root" $root "node" $node }}
+{{ if $index }}
+---
+{{ end }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "siprec.fullname" . }}
-  namespace: {{ include "siprec-stack.namespace" . }}
+  name: {{ include "siprec.nodeFullname" $nodeCtx }}
+  namespace: {{ include "siprec-stack.namespace" $root }}
   labels:
-    {{- include "siprec.labels" . | nindent 4 }}
+    {{- include "siprec.labels" $root | nindent 4 }}
+    siprec-stack/recorder-node: {{ include "siprec.nodeName" $node | quote }}
   annotations:
     # GKE Internal Passthrough Network Load Balancer (L4) fronting the SIPREC
-    # recorder DaemonSet directly — there is no Kamailio proxy in front of it
-    # anymore. SBCs send SIP INVITEs to the LB VIP on UDP/5060; the LB
-    # forwards (passthrough, source-IP preserved) to whichever recorder node
-    # has a ready pod.
-    siprec-stack/purpose: "siprec-recorder-loadbalancer"
-    {{- with .Values.siprecRecorder.service.annotations }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
+    # recorder pod for this configured node directly. SBCs send SIP INVITEs to
+    # this node's LB VIP on UDP/5060; the LB forwards passthrough traffic only
+    # to the node with the matching Ready pod.
+    siprec-stack/purpose: "siprec-recorder-node-loadbalancer"
+    siprec-stack/recorder-node: {{ include "siprec.nodeName" $node | quote }}
+{{ with $root.Values.siprecRecorder.service.annotations }}
+{{ toYaml . | nindent 4 }}
+{{ end }}
 spec:
-  type: {{ .Values.siprecRecorder.service.type }}
-  {{- if and (eq .Values.siprecRecorder.service.type "LoadBalancer") .Values.siprecRecorder.service.loadBalancerIP }}
-  # Pin the internal LB to a specific pre-reserved VPC IP. This same VIP also
-  # fronts the RTP media path (UDP rtpPortStart–rtpPortEnd). Because k8s
-  # Services cannot express a 20 000-port UDP range, the media forwarding
-  # rule must be provisioned out-of-band against the same address; reserve
-  # it with --purpose=SHARED_LOADBALANCER_VIP so both rules can coexist.
-  loadBalancerIP: {{ .Values.siprecRecorder.service.loadBalancerIP | quote }}
-  {{- end }}
+  type: {{ $root.Values.siprecRecorder.service.type }}
+{{ if eq $root.Values.siprecRecorder.service.type "LoadBalancer" }}
+  # Pin this node's internal LB to its pre-reserved VPC IP. The same VIP should
+  # also front the node's RTP media path (UDP rtpPortStart–rtpPortEnd) through
+  # an out-of-band GCP forwarding rule.
+  loadBalancerIP: {{ required (printf "siprecRecorder.nodes[%d].loadBalancerIP is required" $index) $node.loadBalancerIP | quote }}
+{{ end }}
   # externalTrafficPolicy: Local makes GCP skip SNAT so the real SBC source
   # IP reaches the recorder pod, and only nodes with a Ready pod receive
-  # traffic (no cross-node hop, no health-check noise on empty nodes).
+  # traffic. Since this Service selects one node's pod, only that node should
+  # become a healthy backend.
   externalTrafficPolicy: Local
   selector:
-    {{- include "siprec.selectorLabels" . | nindent 4 }}
+    {{- include "siprec.nodeSelectorLabels" $nodeCtx | nindent 4 }}
   ports:
     - name: sip-udp
-      port: {{ .Values.siprecRecorder.service.port }}
+      port: {{ $root.Values.siprecRecorder.service.port }}
       targetPort: sip-udp
       protocol: UDP
+{{ end }}

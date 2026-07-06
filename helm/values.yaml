@@ -9,20 +9,19 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # SIPREC Recorder — streamlink
 #
-# Deployed as a DaemonSet so exactly one pod lands on every recorder node.
-# Uses host networking for direct RTP access; claims the maximum possible
-# CPU and memory on each c2-standard-4 node (4 vCPU / 16 GiB).
+# Deployed as one node-pinned DaemonSet per configured recorder node. Each
+# node gets its own Internal passthrough LB VIP for SIP and RTP.
 #
 # Topology:
-#   SBC ──SIP/RTP──▶ Internal LB VIP 100.73.16.5
-#                            │  passthrough (Local, no SNAT)
-#                            ▼
-#                    recorder node:5060 / :rtpPort
+#   SBC ──SIP/RTP──▶ node-specific Internal LB VIP
+#                              │  passthrough (Local, no SNAT)
+#                              ▼
+#                      assigned recorder node:5060 / :rtpPort
 #
-# There is no Kamailio proxy in front: SBCs talk directly to the LB VIP that
-# fronts the recorder DaemonSet.
+# There is no Kamailio proxy in front: SBCs talk directly to the per-node LB
+# VIP assigned to the target recorder node.
 #
-# Node preparation (single node for now):
+# Node preparation:
 #   kubectl label  node <recorder-node>  siprec-role=recorder
 #   kubectl taint  node <recorder-node>  siprec-role=recorder:NoSchedule
 #
@@ -43,6 +42,21 @@ siprecRecorder:
       operator: Equal
       value: recorder
       effect: NoSchedule
+
+  # ── Recorder nodes ──────────────────────────────────────────────────────────
+  # Static inventory of recorder nodes. The chart renders one node-pinned
+  # DaemonSet, one node-specific ConfigMap, and one Internal LoadBalancer
+  # Service per entry. Each loadBalancerIP should be pre-reserved in the VPC.
+  #
+  # Replace hostname with the node's actual kubernetes.io/hostname value:
+  #   kubectl get nodes --show-labels | grep kubernetes.io/hostname
+  nodes:
+    - name: recorder-1
+      hostname: replace-with-recorder-node-hostname
+      # VIP advertised in SDP and used by the node-specific Internal NLB.
+      # Reserve with --purpose=SHARED_LOADBALANCER_VIP if an out-of-band RTP
+      # forwarding rule will share this address with the SIP Service.
+      loadBalancerIP: "100.73.16.5"
 
   # ── Resource claim ──────────────────────────────────────────────────────────
   # Node allocatable: 3920m CPU / ~12.96 GiB (13591716Ki).
@@ -65,23 +79,14 @@ siprecRecorder:
   # The directory is created automatically (type: DirectoryOrCreate).
   recordingsHostPath: /var/lib/siprec/recordings
 
-  # ── Service fronting the DaemonSet ─────────────────────────────────────────
-  # GKE Internal Passthrough Network Load Balancer (L4) that accepts inbound
-  # SIPREC traffic from SBCs / call controllers on UDP/5060 and forwards it
-  # directly to a recorder pod via hostNetwork (externalTrafficPolicy: Local).
+  # ── Services fronting the DaemonSets ───────────────────────────────────────
+  # GKE Internal Passthrough Network Load Balancers (L4). One Service is
+  # rendered per siprecRecorder.nodes entry, accepts inbound SIPREC traffic on
+  # UDP/5060, and forwards only to that node's recorder pod via hostNetwork
+  # (externalTrafficPolicy: Local).
   service:
     type: LoadBalancer
     port: 5060
-    # Pre-reserved VPC IP that fronts both SIP signalling (this Service) and
-    # the RTP media path (UDP rtpPortStart–rtpPortEnd, provisioned out-of-band
-    # because a k8s Service can't express a 20 000-port range). Reserve with:
-    #
-    #   gcloud compute addresses create streamlink-media-vip \
-    #     --region=<region> --subnet=<subnet> \
-    #     --addresses=100.73.16.5 \
-    #     --purpose=SHARED_LOADBALANCER_VIP
-    #
-    loadBalancerIP: "100.73.16.5"
     annotations:
       # Internal NLB — private VPC only, no public internet exposure.
       networking.gke.io/load-balancer-type: "Internal"
@@ -143,27 +148,21 @@ siprecRecorder:
   config:
     sipListenAddr: "0.0.0.0:5060"
 
-    # Address stamped into the SDP "c=" line of the 200 OK answer — i.e. the
-    # IP the SBC will send RTP to. We deliberately advertise the shared
-    # Internal Passthrough NLB VIP (100.73.16.5) here, NOT the recorder's
-    # own node IP:
+    # media_ip is rendered per node from siprecRecorder.nodes[].loadBalancerIP.
+    # That address is stamped into the SDP "c=" line of the 200 OK answer —
+    # i.e. the IP the SBC will send RTP to. We deliberately advertise the
+    # node-specific Internal Passthrough NLB VIP, NOT the recorder's own node IP:
     #
-    #   SBC ──RTP──▶ 100.73.16.5 (NLB VIP)
-    #                      │  passthrough, preserves dst port
-    #                      ▼
-    #                recorder node:<rtpPort>
+    #   SBC ──RTP──▶ node-specific NLB VIP
+    #                         │  passthrough, preserves dst port
+    #                         ▼
+    #                   assigned recorder node:<rtpPort>
     #
-    # The GCP Internal Passthrough NLB fronting this stack must therefore
-    # forward the full rtpPortStart–rtpPortEnd UDP range (in addition to
-    # 5060 for SIP) to the recorder DaemonSet's nodes. Each recorder pod
-    # binds 0.0.0.0:<rtpPort> via hostNetwork, so once the packet hits the
-    # recorder node on the right port it lands on the correct rtpRecorder.
+    # Each per-node VIP needs an out-of-band GCP forwarding rule for the full
+    # rtpPortStart–rtpPortEnd UDP range in addition to the Kubernetes-managed
+    # SIP/5060 Service. Plain Kubernetes Services cannot express this large
+    # UDP range.
     #
-    # Leave this empty ONLY when the SBC can reach the recorder nodes
-    # directly (no LB in front) — in that case detectMediaIP() will pick
-    # the node's primary VPC IP automatically.
-    mediaIP: "100.73.16.5"
-
     # RTP port range.  Each concurrent SIPREC session consumes 2 UDP ports
     # (one per audio leg).  10000–30000 = 20 000 ports = up to 10 000 sessions,
     # which is well within what a single c2-standard-4 can sustain CPU-wise.

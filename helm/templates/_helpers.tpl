@@ -39,6 +39,30 @@ Full name of the SIPREC recorder DaemonSet / Service.
 {{- end }}
 
 {{/*
+Stable, DNS-safe suffix for a configured recorder node.
+*/}}
+{{- define "siprec.nodeName" -}}
+{{- required "siprecRecorder.nodes[].name is required" .name | lower | replace "_" "-" | trunc 30 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Full name for a node-scoped SIPREC recorder resource.
+*/}}
+{{- define "siprec.nodeFullname" -}}
+{{- $root := .root -}}
+{{- $nodeName := include "siprec.nodeName" .node -}}
+{{- printf "%s-%s" (include "siprec.fullname" $root) $nodeName | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Selector labels for a single node-scoped recorder pod.
+*/}}
+{{- define "siprec.nodeSelectorLabels" -}}
+{{ include "siprec.selectorLabels" .root }}
+siprec-stack/recorder-node: {{ include "siprec.nodeName" .node | quote }}
+{{- end }}
+
+{{/*
 Name of the Kubernetes ServiceAccount used by the SIPREC recorder pods.
 */}}
 {{- define "siprec.serviceAccountName" -}}

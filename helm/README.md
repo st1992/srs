@@ -10,15 +10,15 @@ SBC / call controller (internal VPC)
           │  RTP media            UDP 10000-30000
           ▼
 ┌─────────────────────────────────────────────────────┐
-│  GCP Internal Passthrough NLB  (L4, private VIP)    │
-│  Frontend IP: 100.73.16.5                            │
-│  externalTrafficPolicy: Local → no SNAT              │
+│  Per-node GCP Internal Passthrough NLBs             │
+│  Frontend IPs: one pre-reserved VIP per node        │
+│  externalTrafficPolicy: Local → no SNAT             │
 └──────────────────────┬──────────────────────────────┘
                        │
                        ▼
 ┌──────────────────────────────────────────────────────┐
 │  Recorder node  (c2-standard-4, hostNetwork)          │
-│  DaemonSet — one pod per labelled node                │
+│  Node-pinned DaemonSet pod                            │
 │                                                       │
 │  • SIP   UDP 5060               (signalling)          │
 │  • RTP   UDP 10000-30000        (media)               │
@@ -29,23 +29,27 @@ SBC / call controller (internal VPC)
    GCS bucket  (recordings + metadata)
 ```
 
-The recorder DaemonSet sits **directly behind the Internal NLB** — there is
+Each recorder pod sits **directly behind its own Internal NLB VIP** — there is
 no Kamailio proxy in front of it any more. SBCs send both SIP signalling and
-RTP media to the LB VIP `100.73.16.5`; the LB forwards (passthrough,
-source-IP preserved) straight to the recorder pod via hostNetwork.
+RTP media to the VIP assigned to the target recorder node; that VIP forwards
+(passthrough, source-IP preserved) straight to the node-pinned recorder pod via
+hostNetwork.
 
 Because a Kubernetes `Service` cannot express a 20 000-port UDP range, the
-RTP forwarding rule on `100.73.16.5` must be provisioned out-of-band against
-the same shared VIP (see [RTP forwarding rule](#rtp-forwarding-rule) below).
+RTP forwarding rule for each per-node VIP must be provisioned out-of-band
+against the same VIP used by that node's SIP `Service` (see
+[RTP forwarding rule](#rtp-forwarding-rule) below).
 
 **Traffic path for a new SIPREC session:**
 
-1. SBC sends `INVITE` with the SIPREC multipart body to `100.73.16.5:5060`.
-2. NLB forwards the packet (passthrough) to a Ready recorder pod.
-3. Recorder answers `200 OK` with `c=IN IP4 100.73.16.5` in SDP so the SBC
-   sends RTP back to the same shared VIP.
-4. RTP packets traverse the RTP forwarding rule on the shared VIP and land
-   on the same recorder node by destination port.
+1. SBC sends `INVITE` with the SIPREC multipart body to the assigned node VIP
+   on UDP/5060.
+2. That node's NLB forwards the packet (passthrough) to the matching Ready
+   recorder pod.
+3. Recorder answers `200 OK` with the same node VIP in SDP so the SBC sends
+   RTP back to that VIP.
+4. RTP packets traverse that node VIP's RTP forwarding rule and land on the
+   same recorder node by destination port.
 
 ---
 
@@ -90,13 +94,14 @@ docker push ${IMAGE}:$(git rev-parse --short HEAD)
 
 ---
 
-## Step 2 — Prepare the recorder node
+## Step 2 — Prepare the recorder nodes
 
 The chart uses **node selectors + taints** to isolate the workload. This
-setup targets a single recorder node (`c2-standard-4`, 4 vCPU / 16 GiB).
+setup targets a static list of recorder nodes (`c2-standard-4`, 4 vCPU /
+16 GiB).
 
 ```bash
-RECORDER_NODE=gke-cluster-recorder-pool-xxxx   # replace with actual node name
+RECORDER_NODE=gke-cluster-recorder-pool-xxxx   # repeat per recorder node
 
 kubectl label node ${RECORDER_NODE} siprec-role=recorder
 kubectl taint node ${RECORDER_NODE} siprec-role=recorder:NoSchedule
@@ -109,19 +114,22 @@ kubectl get nodes -L siprec-role
 kubectl describe node ${RECORDER_NODE} | grep -A5 Taints
 ```
 
-To scale out later, label additional nodes the same way — the DaemonSet
-will place one pod per labelled node automatically.
+Each node must also be listed in `siprecRecorder.nodes` with its
+`kubernetes.io/hostname` value and pre-reserved VIP. To scale out later, add
+another node to that values list, reserve another VIP, and label/taint the
+node the same way.
 
 ---
 
-## Step 3 — Reserve the shared LB VIP
+## Step 3 — Reserve the per-node LB VIPs
 
-`100.73.16.5` is used by both the SIP `Service` (managed by this chart)
-**and** the out-of-band RTP forwarding rule. Reserve it with the
-`SHARED_LOADBALANCER_VIP` purpose so both rules can coexist on the same IP:
+Each `siprecRecorder.nodes[].loadBalancerIP` is used by that node's SIP
+`Service` (managed by this chart) **and** its out-of-band RTP forwarding rule.
+Reserve every VIP with the `SHARED_LOADBALANCER_VIP` purpose so both rules can
+coexist on the same IP:
 
 ```bash
-gcloud compute addresses create streamlink-media-vip \
+gcloud compute addresses create streamlink-recorder-1-vip \
   --region=${REGION} \
   --subnet=<your-subnet> \
   --addresses=100.73.16.5 \
@@ -146,11 +154,15 @@ siprecRecorder:
     repository: us-central1-docker.pkg.dev/my-gcp-project/siprec/siprec-recorder
     tag: "latest"             # or a specific git-sha tag
 
-  service:
-    loadBalancerIP: "100.73.16.5"
+  nodes:
+    - name: recorder-1
+      hostname: gke-cluster-recorder-pool-xxxx
+      loadBalancerIP: "100.73.16.5"
+    - name: recorder-2
+      hostname: gke-cluster-recorder-pool-yyyy
+      loadBalancerIP: "100.73.16.6"
 
   config:
-    mediaIP: "100.73.16.5"
     gcsBucket: "my-recordings-bucket"
     gcsMetadataBucket: "my-metadata-bucket"
 ```
@@ -198,31 +210,34 @@ helm upgrade siprec ./helm \
 
 ## Step 6 — Provision the RTP forwarding rule
 
-A k8s `Service` can't express a 20 000-port UDP range, so the RTP forwarder
-must be created with `gcloud` against the same shared VIP. Example:
+A k8s `Service` can't express a 20 000-port UDP range, so create one RTP
+forwarder per configured node VIP. Example for `recorder-1`:
 
 ```bash
-# Unmanaged instance group containing the recorder node(s)
-gcloud compute backend-services create streamlink-rtp-bs \
+# Unmanaged instance group containing only the recorder-1 VM.
+gcloud compute backend-services create streamlink-recorder-1-rtp-bs \
   --region=${REGION} \
   --load-balancing-scheme=INTERNAL \
   --protocol=UDP \
   --health-checks=streamlink-sip-hc
 
-gcloud compute backend-services add-backend streamlink-rtp-bs \
+gcloud compute backend-services add-backend streamlink-recorder-1-rtp-bs \
   --region=${REGION} \
-  --instance-group=<recorder-ig> \
+  --instance-group=<recorder-1-ig> \
   --instance-group-zone=<zone>
 
-gcloud compute forwarding-rules create streamlink-rtp-fr \
+gcloud compute forwarding-rules create streamlink-recorder-1-rtp-fr \
   --region=${REGION} \
   --load-balancing-scheme=INTERNAL \
   --network=<vpc> --subnet=<subnet> \
   --address=100.73.16.5 \
   --ip-protocol=UDP \
   --ports=10000-30000 \
-  --backend-service=streamlink-rtp-bs
+  --backend-service=streamlink-recorder-1-rtp-bs
 ```
+
+Repeat this pattern for every `siprecRecorder.nodes[]` entry, using that
+entry's VIP and a backend that contains only the matching recorder node.
 
 ---
 
@@ -231,7 +246,7 @@ gcloud compute forwarding-rules create streamlink-rtp-fr \
 ```bash
 kubectl get pods -n siprec -l app.kubernetes.io/name=siprec-recorder -o wide
 kubectl get svc  -n siprec
-# The siprec-recorder Service should show EXTERNAL-IP = 100.73.16.5
+# Each siprec-recorder-* Service should show its configured per-node VIP.
 ```
 
 Tail logs:
@@ -251,14 +266,15 @@ kubectl exec -it -n siprec ${POD} -- sngrep -d any port 5060
 
 ## Step 8 — Point your SBC at the LB
 
-Configure your SBC / call controller to send SIPREC `INVITE` requests to:
+Configure your SBC / call controller to send each SIPREC `INVITE` request to
+the VIP for the recorder node that should handle that call:
 
 ```
-sip:100.73.16.5:5060
+sip:<node-specific-vip>:5060
 ```
 
-RTP is automatically targeted at the same address because the recorder
-stamps `mediaIP: 100.73.16.5` into its SDP answer.
+RTP is automatically targeted at the same address because the node-specific
+recorder config stamps that VIP into its SDP answer.
 
 If the SBC is on-premises:
 - Ensure Cloud VPN or Interconnect connects the on-prem segment to the GKE VPC.
@@ -328,6 +344,9 @@ kubectl taint node ${RECORDER_NODE} siprec-role=recorder:NoSchedule-
 | `siprecRecorder.image.repository` | `…/cx-streamlink-rec` | Recorder container image |
 | `siprecRecorder.image.tag` | `dev` | Recorder image tag |
 | `siprecRecorder.nodeSelector` | `siprec-role: recorder` | Where the DaemonSet runs |
+| `siprecRecorder.nodes[].name` | `recorder-1` | Stable suffix for per-node resources |
+| `siprecRecorder.nodes[].hostname` | `replace-with-recorder-node-hostname` | Node `kubernetes.io/hostname` target |
+| `siprecRecorder.nodes[].loadBalancerIP` | `100.73.16.5` | Pre-reserved per-node Internal LB VIP |
 | `siprecRecorder.resources.requests.cpu` | `2000m` | CPU request |
 | `siprecRecorder.resources.requests.memory` | `11Gi` | Memory request |
 | `siprecRecorder.resources.limits.cpu` | `2000m` | CPU limit |
@@ -335,10 +354,16 @@ kubectl taint node ${RECORDER_NODE} siprec-role=recorder:NoSchedule-
 | `siprecRecorder.recordingsHostPath` | `/var/lib/siprec/recordings` | Node-local recording staging path |
 | `siprecRecorder.service.type` | `LoadBalancer` | Service type fronting SIP |
 | `siprecRecorder.service.port` | `5060` | SIP port |
-| `siprecRecorder.service.loadBalancerIP` | `100.73.16.5` | Pre-reserved shared LB VIP |
 | `siprecRecorder.service.annotations` | GKE internal NLB | Service annotations |
-| `siprecRecorder.config.mediaIP` | `100.73.16.5` | IP advertised in SDP for RTP |
 | `siprecRecorder.config.rtpPortStart` | `10000` | RTP port range start |
 | `siprecRecorder.config.rtpPortEnd` | `30000` | RTP port range end |
 | `siprecRecorder.config.gcsBucket` | `cx-siprec-audio-raw` | GCS bucket for recordings |
 | `siprecRecorder.config.gcsMetadataBucket` | `cx-siprec-metadata` | GCS bucket for per-call metadata |
+
+kubectl get nodes -L kubernetes.io/hostname
+
+kubectl label node <node-1> siprec-role=recorder --overwrite
+kubectl taint node <node-1> siprec-role=recorder:NoSchedule --overwrite
+
+kubectl label node <node-2> siprec-role=recorder --overwrite
+kubectl taint node <node-2> siprec-role=recorder:NoSchedule --overwrite
