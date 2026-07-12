@@ -22,7 +22,7 @@ data:
     debug={{ $root.Values.kamailio.config.debug }}
     log_stderror=yes
     log_facility=LOG_LOCAL0
-    log_prefix="[$time(%Y-%m-%d %H:%M:%S)] "
+    log_prefix="{$ci} "
 
     fork=yes
     children={{ $root.Values.kamailio.config.children }}
