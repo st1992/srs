@@ -20,7 +20,7 @@ spec:
       labels:
         {{- include "kamailio.labels" . | nindent 8 }}
       annotations:
-        checksum/kamailio-config: {{ printf "%s:%s" (toJson .Values.kamailio.config) (toJson .Values.siprecRecorder.instances) | sha256sum }}
+        checksum/kamailio-config: {{ printf "%s:%s:%v" (toJson .Values.kamailio) (toJson .Values.siprecRecorder.instances) .Values.siprecRecorder.service.port | sha256sum }}
     spec:
       terminationGracePeriodSeconds: 30
       {{- with .Values.kamailio.nodeSelector }}

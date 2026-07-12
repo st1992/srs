@@ -41,7 +41,8 @@ app.kubernetes.io/instance: {{ .Release.Name | quote }}
 {{- define "siprec.instanceFullname" -}}
 {{- $root := .root -}}
 {{- $instanceName := include "siprec.instanceName" .instance -}}
-{{- printf "%s-%s" (include "siprec.fullname" $root) $instanceName | trunc 63 | trimSuffix "-" }}
+{{- $baseName := include "siprec.fullname" $root | trunc 32 | trimSuffix "-" -}}
+{{- printf "%s-%s" $baseName $instanceName | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/* Selector labels for one recorder Deployment. */}}

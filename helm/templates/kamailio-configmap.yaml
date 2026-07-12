@@ -122,11 +122,19 @@ data:
     route[WITHINDLG] {
         $var(srs) = $null;
         if ($hdr(Route) != $null) {
-            $var(srs) = $(hdr(Route){uri.param,srs});
+            # Route is a SIP name-address. Extract its URI before reading the
+            # custom parameter that carries the selected recorder Service.
+            $var(route_uri) = $(hdr(Route){nameaddr.uri});
+            $var(srs) = $(var(route_uri){uri.param,srs});
         }
 
         if (!loose_route()) {
             if (is_method("ACK")) {
+                # A non-2xx final response does not create a route set, but its
+                # ACK still belongs to the existing INVITE transaction.
+                if (t_check_trans()) {
+                    t_relay();
+                }
                 exit;
             }
             sl_send_reply("404", "Not Found (no matching dialog)");

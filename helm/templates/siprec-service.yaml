@@ -1,15 +1,11 @@
 {{- $root := . }}
-{{- $rtpStart := int $root.Values.siprecRecorder.config.rtpPortStart }}
-{{- $rtpEnd := int $root.Values.siprecRecorder.config.rtpPortEnd }}
-{{- if or (ne (mod $rtpStart 2) 0) (ne (mod $rtpEnd 2) 0) }}
-{{- fail "siprecRecorder.config.rtpPortStart and rtpPortEnd must both be even" }}
+{{- $instanceNames := dict }}
+{{- range $index, $instance := $root.Values.siprecRecorder.instances }}
+{{- $instanceName := include "siprec.instanceName" $instance }}
+{{- if hasKey $instanceNames $instanceName }}
+{{- fail (printf "siprecRecorder.instances[%d].name normalizes to duplicate name %q" $index $instanceName) }}
 {{- end }}
-{{- if lt $rtpEnd $rtpStart }}
-{{- fail "siprecRecorder.config.rtpPortEnd must be greater than or equal to rtpPortStart" }}
-{{- end }}
-{{- $rtpPortCount := add (div (sub $rtpEnd $rtpStart) 2) 1 }}
-{{- if gt $rtpPortCount 99 }}
-{{- fail (printf "the configured RTP range contains %d even ports; GKE allows at most 99 plus SIP/5060" $rtpPortCount) }}
+{{- $_ := set $instanceNames $instanceName true }}
 {{- end }}
 {{ range $index, $instance := $root.Values.siprecRecorder.instances }}
 {{ $instanceCtx := dict "root" $root "instance" $instance }}
