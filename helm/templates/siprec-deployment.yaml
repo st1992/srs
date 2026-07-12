@@ -61,6 +61,11 @@ spec:
         - name: siprec-recorder
           image: "{{ $root.Values.siprecRecorder.image.repository }}:{{ $root.Values.siprecRecorder.image.tag }}"
           imagePullPolicy: {{ $root.Values.siprecRecorder.image.pullPolicy }}
+          securityContext:
+            capabilities:
+              add:
+                - NET_RAW
+                - NET_ADMIN
           resources:
             {{- toYaml $root.Values.siprecRecorder.resources | nindent 12 }}
           ports:
