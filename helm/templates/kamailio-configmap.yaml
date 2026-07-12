@@ -157,7 +157,3 @@ data:
         }
         exit;
     }
-
-    onreply_route {
-        # SIP responses and SIPREC multipart bodies pass through unchanged.
-    }
