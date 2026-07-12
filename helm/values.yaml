@@ -60,7 +60,7 @@ siprecRecorder:
 
   gcp:
     workloadIdentity:
-      gcpServiceAccount: "adtgcp-css-dev-insight-sa@adtgcp-cnt-dev-css-tlcm-fe10.iam.gserviceaccount.com"
+      gcpServiceAccount: "adtgcp-ccs-dev-insight-sa@adtgcp-ent-dev-ccs-tlcm-fe10.iam.gserviceaccount.com"
 
     credentialsSecret:
       name: ""
