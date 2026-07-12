@@ -1,0 +1,30 @@
+{{- $root := . }}
+{{- range $index, $instance := $root.Values.siprecRecorder.instances }}
+{{- $instanceCtx := dict "root" $root "instance" $instance }}
+{{- $persistence := deepCopy $root.Values.siprecRecorder.persistence }}
+{{- with $instance.persistence }}
+{{- $persistence = mergeOverwrite $persistence . }}
+{{- end }}
+{{- if $persistence.enabled }}
+{{- if $index }}
+---
+{{- end }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "siprec.instancePVCName" $instanceCtx }}
+  namespace: {{ include "siprec-stack.namespace" $root }}
+  labels:
+    {{- include "siprec.labels" $root | nindent 4 }}
+    siprec-stack/recorder-instance: {{ include "siprec.instanceName" $instance | quote }}
+spec:
+  accessModes:
+    {{- toYaml $persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ $persistence.size }}
+  {{- with $persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

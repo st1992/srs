@@ -1,16 +1,16 @@
 apiVersion: v2
 name: siprec-stack
 description: >
-  streamlink SIPREC media-recorder DaemonSets (one node-pinned pod per
-  configured recorder node, host-network, each fronted directly by its own
-  GKE Internal Passthrough NLB).
+  Kamailio SIPREC signaling proxy and independently scheduled streamlink
+  recorder Deployments with per-recorder GKE Internal Passthrough NLBs.
 type: application
-version: 0.3.0
+version: 0.4.0
 appVersion: "1.0.0"
 keywords:
   - siprec
   - sip
   - recording
   - rtp
+  - kamailio
 maintainers:
   - name: platform-team

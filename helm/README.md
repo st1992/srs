@@ -1,369 +1,250 @@
 # siprec-stack Helm chart
 
-End-to-end installation guide for the streamlink SIPREC recording stack on GKE.
+Deploys a Kamailio SIPREC signaling proxy and a configurable pool of
+streamlink SIPREC recorders on GKE.
 
-## Architecture overview
+## Architecture
 
-```
-SBC / call controller (internal VPC)
-          │  SIP INVITE (SIPREC)  UDP 5060
-          │  RTP media            UDP 10000-30000
-          ▼
-┌─────────────────────────────────────────────────────┐
-│  Per-node GCP Internal Passthrough NLBs             │
-│  Frontend IPs: one pre-reserved VIP per node        │
-│  externalTrafficPolicy: Local → no SNAT             │
-└──────────────────────┬──────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────┐
-│  Recorder node  (c2-standard-4, hostNetwork)          │
-│  Node-pinned DaemonSet pod                            │
-│                                                       │
-│  • SIP   UDP 5060               (signalling)          │
-│  • RTP   UDP 10000-30000        (media)               │
-│  • sngrep available in-pod for live SIP capture       │
-└──────────┬───────────────────────────────────────────┘
-           │
-           ▼
-   GCS bucket  (recordings + metadata)
+```text
+SIPREC source
+  |
+  | SIP/UDP 5060
+  v
+Kamailio internal passthrough NLB (one VIP)
+  |
+  | round-robin to stable Kubernetes Service DNS
+  v
+Recorder instance Service (one internal passthrough NLB VIP per recorder)
+  |                         ^
+  | SIP/UDP 5060            | RTP on configured even UDP ports
+  v                         |
+One-replica Deployment -----+
+  |
+  +-- one PVC for recording staging
+  +-- GCS upload through Workload Identity or a credentials Secret
 ```
 
-Each recorder pod sits **directly behind its own Internal NLB VIP** — there is
-no Kamailio proxy in front of it any more. SBCs send both SIP signalling and
-RTP media to the VIP assigned to the target recorder node; that VIP forwards
-(passthrough, source-IP preserved) straight to the node-pinned recorder pod via
-hostNetwork.
+Each `siprecRecorder.instances[]` entry renders:
 
-Because a Kubernetes `Service` cannot express a 20 000-port UDP range, the
-RTP forwarding rule for each per-node VIP must be provisioned out-of-band
-against the same VIP used by that node's SIP `Service` (see
-[RTP forwarding rule](#rtp-forwarding-rule) below).
+- one one-replica `Deployment`;
+- one recorder-specific `ConfigMap`;
+- one `ReadWriteOnce` PVC by default; and
+- one internal passthrough `LoadBalancer` Service with a reserved VIP.
 
-**Traffic path for a new SIPREC session:**
+Recorder Deployments are not hostname-pinned and do not use host networking,
+so multiple recorder pods can run on the same node when resources permit.
+Each Service has a unique selector and routes only to its recorder Deployment.
+Scale the recorder pool by adding instances, not by increasing an individual
+Deployment's replica count.
 
-1. SBC sends `INVITE` with the SIPREC multipart body to the assigned node VIP
-   on UDP/5060.
-2. That node's NLB forwards the packet (passthrough) to the matching Ready
-   recorder pod.
-3. Recorder answers `200 OK` with the same node VIP in SDP so the SBC sends
-   RTP back to that VIP.
-4. RTP packets traverse that node VIP's RTP forwarding rule and land on the
-   same recorder node by destination port.
+Kamailio uses dispatcher algorithm `4` (round-robin in Kamailio 6.0) for new
+dialogs. Dispatcher entries are generated from recorder Service FQDNs. The
+selected recorder URI is stored in Kamailio's Record-Route parameter so ACK,
+BYE, and other in-dialog requests return to the same recorder.
 
----
+## RTP port limit
+
+GKE supports at most 100 ports on an internal LoadBalancer Service. One port is
+used by SIP/5060, leaving at most 99 RTP ports. The recorder allocates even RTP
+ports, so the chart exposes every even port in the inclusive
+`rtpPortStart`-`rtpPortEnd` range.
+
+The defaults expose 99 RTP ports (`10000, 10002, ..., 10196`). A SIPREC session
+uses two ports, one per media leg, providing capacity for approximately 49
+simultaneous sessions per recorder.
+
+When more than five ports are declared, GKE configures the NLB forwarding rule
+for all ports. Kubernetes still routes only the 100 Service ports declared by
+this chart, and GKE firewall automation only opens those declared ports. Each
+recorder Service also consumes 100 NodePorts, so account for the cluster's
+NodePort range when adding many recorder instances.
 
 ## Prerequisites
 
-| Tool | Minimum version | Install |
-|---|---|---|
-| `gcloud` CLI | 460+ | https://cloud.google.com/sdk/docs/install |
-| `kubectl` | 1.28+ | `gcloud components install kubectl` |
-| `helm` | 3.14+ | https://helm.sh/docs/intro/install/ |
-| Docker (or `docker buildx`) | 24+ | https://docs.docker.com/engine/install/ |
+- Helm 3.14 or newer.
+- A GKE cluster with enough NodePort capacity.
+- One reserved regional internal IPv4 address for Kamailio.
+- One reserved regional internal IPv4 address per recorder instance.
+- A default StorageClass, or an explicit recorder storage class.
+- Firewall reachability from SIPREC sources to UDP/5060 on the Kamailio VIP
+  and to the configured RTP UDP ports on every recorder VIP.
+- GCS permissions configured with Workload Identity or a Secret if recordings
+  are uploaded.
 
-You need:
-- A running GKE Standard cluster (Autopilot does not support `hostNetwork: true`).
-- A GCP Artifact Registry (or any OCI registry) to push the recorder image.
-- `roles/container.developer` + `roles/artifactregistry.writer` on the build principal.
-
----
-
-## Step 1 — Build and push the SIPREC recorder image
-
-The runtime image is Debian-slim with `sngrep` pre-installed for in-pod SIP
-debugging (`kubectl exec -it <pod> -- sngrep -d any port 5060`).
+Reserve the VIPs in the same region and subnet as the cluster:
 
 ```bash
-PROJECT=my-gcp-project
-REGION=us-central1
-REPO=siprec
-IMAGE=${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/siprec-recorder
+gcloud compute addresses create siprec-kamailio-vip \
+  --region=REGION \
+  --subnet=SUBNET \
+  --addresses=10.20.0.100
 
-gcloud auth configure-docker ${REGION}-docker.pkg.dev
-
-docker build \
-  --build-arg BUILD_EXPIRES=$(date -d '+3 months' +%Y-%m-%d) \
-  -t ${IMAGE}:latest \
-  -t ${IMAGE}:$(git rev-parse --short HEAD) \
-  .
-
-docker push ${IMAGE}:latest
-docker push ${IMAGE}:$(git rev-parse --short HEAD)
+gcloud compute addresses create siprec-recorder-1-vip \
+  --region=REGION \
+  --subnet=SUBNET \
+  --addresses=100.73.16.5
 ```
 
----
+## Configure
 
-## Step 2 — Prepare the recorder nodes
-
-The chart uses **node selectors + taints** to isolate the workload. This
-setup targets a static list of recorder nodes (`c2-standard-4`, 4 vCPU /
-16 GiB).
-
-```bash
-RECORDER_NODE=gke-cluster-recorder-pool-xxxx   # repeat per recorder node
-
-kubectl label node ${RECORDER_NODE} siprec-role=recorder
-kubectl taint node ${RECORDER_NODE} siprec-role=recorder:NoSchedule
-```
-
-Verify:
-
-```bash
-kubectl get nodes -L siprec-role
-kubectl describe node ${RECORDER_NODE} | grep -A5 Taints
-```
-
-Each node must also be listed in `siprecRecorder.nodes` with its
-`kubernetes.io/hostname` value and pre-reserved VIP. To scale out later, add
-another node to that values list, reserve another VIP, and label/taint the
-node the same way.
-
----
-
-## Step 3 — Reserve the per-node LB VIPs
-
-Each `siprecRecorder.nodes[].loadBalancerIP` is used by that node's SIP
-`Service` (managed by this chart) **and** its out-of-band RTP forwarding rule.
-Reserve every VIP with the `SHARED_LOADBALANCER_VIP` purpose so both rules can
-coexist on the same IP:
-
-```bash
-gcloud compute addresses create streamlink-recorder-1-vip \
-  --region=${REGION} \
-  --subnet=<your-subnet> \
-  --addresses=100.73.16.5 \
-  --purpose=SHARED_LOADBALANCER_VIP
-```
-
----
-
-## Step 4 — Configure `values.yaml`
-
-Copy the shipped defaults and override as needed:
-
-```bash
-cp helm/values.yaml helm/my-values.yaml
-```
-
-Minimum required overrides:
+Create an override file rather than editing the defaults:
 
 ```yaml
-siprecRecorder:
-  image:
-    repository: us-central1-docker.pkg.dev/my-gcp-project/siprec/siprec-recorder
-    tag: "latest"             # or a specific git-sha tag
+kamailio:
+  replicaCount: 1
+  service:
+    loadBalancerIP: "10.20.0.100"
+    loadBalancerSourceRanges:
+      - "10.10.0.0/16"
 
-  nodes:
+siprecRecorder:
+  instances:
     - name: recorder-1
-      hostname: gke-cluster-recorder-pool-xxxx
       loadBalancerIP: "100.73.16.5"
     - name: recorder-2
-      hostname: gke-cluster-recorder-pool-yyyy
-      loadBalancerIP: "100.73.16.6"
+      loadBalancerIP: "100.73.16.64"
+      persistence:
+        size: 50Gi
+
+  # Optional pool-level placement; no hostname is required.
+  nodeSelector:
+    siprec-role: recorder
+
+  persistence:
+    enabled: true
+    accessModes:
+      - ReadWriteOnce
+    size: 20Gi
+    storageClassName: ""
+
+  service:
+    loadBalancerSourceRanges:
+      - "10.10.0.0/16"
 
   config:
+    rtpPortStart: 10000
+    rtpPortEnd: 10196
     gcsBucket: "my-recordings-bucket"
     gcsMetadataBucket: "my-metadata-bucket"
 ```
 
-### Optional NLB annotations
+Both RTP range endpoints must be even. The inclusive range can contain no more
+than 99 even ports. Helm rendering fails early if these constraints are
+violated.
+
+On GKE 1.33.1 or later with subsetting enabled, the internal load balancer
+class can be selected explicitly:
+
+```yaml
+kamailio:
+  service:
+    loadBalancerClass: networking.gke.io/l4-regional-internal
+
+siprecRecorder:
+  service:
+    loadBalancerClass: networking.gke.io/l4-regional-internal
+```
+
+Leave `loadBalancerClass` empty on older clusters; the
+`networking.gke.io/load-balancer-type: Internal` annotation is enabled by
+default.
+
+## GCP authentication
+
+For Workload Identity, set the GCP service-account email:
 
 ```yaml
 siprecRecorder:
-  service:
-    annotations:
-      networking.gke.io/load-balancer-type: "Internal"
-      networking.gke.io/internal-load-balancer-subnet: "siprec-subnet"
-      networking.gke.io/load-balancer-source-ranges: "10.10.0.0/16,172.20.0.0/14"
+  gcp:
+    workloadIdentity:
+      gcpServiceAccount: siprec-recorder@PROJECT.iam.gserviceaccount.com
+    credentialsSecret:
+      name: ""
 ```
 
-> **Why passthrough?**  
-> `externalTrafficPolicy: Local` (set in the template) instructs GKE to skip
-> SNAT on the NLB so packets arrive at the recorder with the real SBC source
-> IP. The NLB only sends traffic to nodes that have a Ready pod, so there is
-> no cross-node hop.
-
----
-
-## Step 5 — Install the chart
+Alternatively, create a Kubernetes Secret and configure its key:
 
 ```bash
-kubectl create namespace siprec
-
-helm install siprec ./helm \
-  --namespace siprec \
-  --values helm/my-values.yaml \
-  --wait --timeout 5m
+kubectl create secret generic siprec-gcp-credentials \
+  --namespace=voice \
+  --from-file=key.json=./service-account.json
 ```
 
-To upgrade later:
+```yaml
+siprecRecorder:
+  gcp:
+    workloadIdentity:
+      gcpServiceAccount: ""
+    credentialsSecret:
+      name: siprec-gcp-credentials
+      key: key.json
+```
+
+## Install or upgrade
 
 ```bash
-helm upgrade siprec ./helm \
-  --namespace siprec \
-  --values helm/my-values.yaml \
-  --wait --timeout 5m
+helm upgrade --install siprec ./helm \
+  --namespace=voice \
+  --create-namespace \
+  --values=helm/my-values.yaml \
+  --wait \
+  --timeout=10m
 ```
 
----
+Point SIPREC sources at the Kamailio VIP on UDP/5060. Do not target recorder
+VIPs for signaling in the normal path. Kamailio forwards signaling to the
+recorder Services, and each recorder advertises its own VIP and allocated RTP
+ports in the SDP answer.
 
-## Step 6 — Provision the RTP forwarding rule
+## Scaling
 
-A k8s `Service` can't express a 20 000-port UDP range, so create one RTP
-forwarder per configured node VIP. Example for `recorder-1`:
+To add recording capacity, append another item to
+`siprecRecorder.instances`, reserve its VIP, and upgrade the release. The chart
+creates a new Deployment, Service, ConfigMap, and PVC without changing existing
+recorder identities.
+
+Kamailio starts with one replica and can be scaled through
+`kamailio.replicaCount`. Dispatcher round-robin counters are local to each
+Kamailio process, so multiple replicas provide balanced per-proxy distribution,
+not one globally shared strict sequence.
+
+The default recorder resource request is 2 CPU and 11 GiB. Multiple recorders
+can share a node only when its allocatable resources satisfy all pod requests;
+tune `siprecRecorder.resources` for the actual workload and node size.
+
+## Verify
+
+Render and lint before deployment:
 
 ```bash
-# Unmanaged instance group containing only the recorder-1 VM.
-gcloud compute backend-services create streamlink-recorder-1-rtp-bs \
-  --region=${REGION} \
-  --load-balancing-scheme=INTERNAL \
-  --protocol=UDP \
-  --health-checks=streamlink-sip-hc
-
-gcloud compute backend-services add-backend streamlink-recorder-1-rtp-bs \
-  --region=${REGION} \
-  --instance-group=<recorder-1-ig> \
-  --instance-group-zone=<zone>
-
-gcloud compute forwarding-rules create streamlink-recorder-1-rtp-fr \
-  --region=${REGION} \
-  --load-balancing-scheme=INTERNAL \
-  --network=<vpc> --subnet=<subnet> \
-  --address=100.73.16.5 \
-  --ip-protocol=UDP \
-  --ports=10000-30000 \
-  --backend-service=streamlink-recorder-1-rtp-bs
+helm lint ./helm
+helm template siprec ./helm --namespace=voice --values=helm/my-values.yaml
 ```
 
-Repeat this pattern for every `siprecRecorder.nodes[]` entry, using that
-entry's VIP and a backend that contains only the matching recorder node.
-
----
-
-## Step 7 — Verify the deployment
+Inspect the running resources:
 
 ```bash
-kubectl get pods -n siprec -l app.kubernetes.io/name=siprec-recorder -o wide
-kubectl get svc  -n siprec
-# Each siprec-recorder-* Service should show its configured per-node VIP.
+kubectl get deploy,pod,pvc,svc -n voice
+kubectl get svc -n voice -l app.kubernetes.io/name=siprec-recorder
+kubectl logs -n voice -l app.kubernetes.io/name=kamailio --follow
 ```
 
-Tail logs:
+The Kamailio ConfigMap should contain one dispatcher line per recorder:
 
 ```bash
-kubectl logs -n siprec -l app.kubernetes.io/name=siprec-recorder --follow --prefix
+kubectl get configmap siprec-kamailio-config -n voice \
+  -o jsonpath='{.data.dispatcher\.list}'
 ```
 
-Live SIP capture inside a pod:
-
-```bash
-POD=$(kubectl get pod -n siprec -l app.kubernetes.io/name=siprec-recorder -o name | head -1)
-kubectl exec -it -n siprec ${POD} -- sngrep -d any port 5060
-```
-
----
-
-## Step 8 — Point your SBC at the LB
-
-Configure your SBC / call controller to send each SIPREC `INVITE` request to
-the VIP for the recorder node that should handle that call:
-
-```
-sip:<node-specific-vip>:5060
-```
-
-RTP is automatically targeted at the same address because the node-specific
-recorder config stamps that VIP into its SDP answer.
-
-If the SBC is on-premises:
-- Ensure Cloud VPN or Interconnect connects the on-prem segment to the GKE VPC.
-- Add GCP firewall rules for UDP `5060` (SIP) and `10000–30000` (RTP) from the SBC source CIDRs.
-
----
-
-## GCP firewall rules
-
-NLB health-check probes originate from `35.191.0.0/16` and `130.211.0.0/22`:
-
-```bash
-GCP_PROJECT=my-gcp-project
-VPC_NETWORK=default                  # replace with your VPC name
-SBC_CIDR="10.10.0.0/16"             # replace with your SBC address range
-
-gcloud compute firewall-rules create allow-siprec-healthcheck \
-  --project=${GCP_PROJECT} \
-  --network=${VPC_NETWORK} \
-  --allow=udp:5060 \
-  --source-ranges="35.191.0.0/16,130.211.0.0/22" \
-  --target-tags=recorder
-
-gcloud compute firewall-rules create allow-siprec-sip \
-  --project=${GCP_PROJECT} \
-  --network=${VPC_NETWORK} \
-  --allow=udp:5060 \
-  --source-ranges="${SBC_CIDR}" \
-  --target-tags=recorder
-
-gcloud compute firewall-rules create allow-siprec-rtp \
-  --project=${GCP_PROJECT} \
-  --network=${VPC_NETWORK} \
-  --allow=udp:10000-30000 \
-  --source-ranges="${SBC_CIDR}" \
-  --target-tags=recorder
-```
-
-> GKE adds the node-pool network tag automatically. Confirm with:
-> ```bash
-> gcloud compute instances describe <node-name> --format='value(tags.items)'
-> ```
-> If the tag is different, replace `recorder` in the rules above.
-
----
+The repository's `sipp-load-test` scenarios can be used to confirm alternating
+recorder selection, in-dialog routing, and RTP arrival through each recorder
+VIP.
 
 ## Uninstall
 
 ```bash
-helm uninstall siprec --namespace siprec
-kubectl delete namespace siprec
+helm uninstall siprec --namespace=voice
 ```
 
-Node labels and taints are **not** removed automatically:
-
-```bash
-kubectl label node ${RECORDER_NODE} siprec-role-
-kubectl taint node ${RECORDER_NODE} siprec-role=recorder:NoSchedule-
-```
-
----
-
-## Values reference
-
-| Key | Default | Description |
-|---|---|---|
-| `siprecRecorder.image.repository` | `…/cx-streamlink-rec` | Recorder container image |
-| `siprecRecorder.image.tag` | `dev` | Recorder image tag |
-| `siprecRecorder.nodeSelector` | `siprec-role: recorder` | Where the DaemonSet runs |
-| `siprecRecorder.nodes[].name` | `recorder-1` | Stable suffix for per-node resources |
-| `siprecRecorder.nodes[].hostname` | `replace-with-recorder-node-hostname` | Node `kubernetes.io/hostname` target |
-| `siprecRecorder.nodes[].loadBalancerIP` | `100.73.16.5` | Pre-reserved per-node Internal LB VIP |
-| `siprecRecorder.resources.requests.cpu` | `2000m` | CPU request |
-| `siprecRecorder.resources.requests.memory` | `11Gi` | Memory request |
-| `siprecRecorder.resources.limits.cpu` | `2000m` | CPU limit |
-| `siprecRecorder.resources.limits.memory` | `11Gi` | Memory limit |
-| `siprecRecorder.recordingsHostPath` | `/var/lib/siprec/recordings` | Node-local recording staging path |
-| `siprecRecorder.service.type` | `LoadBalancer` | Service type fronting SIP |
-| `siprecRecorder.service.port` | `5060` | SIP port |
-| `siprecRecorder.service.annotations` | GKE internal NLB | Service annotations |
-| `siprecRecorder.config.rtpPortStart` | `10000` | RTP port range start |
-| `siprecRecorder.config.rtpPortEnd` | `30000` | RTP port range end |
-| `siprecRecorder.config.gcsBucket` | `cx-siprec-audio-raw` | GCS bucket for recordings |
-| `siprecRecorder.config.gcsMetadataBucket` | `cx-siprec-metadata` | GCS bucket for per-call metadata |
-
-kubectl get nodes -L kubernetes.io/hostname
-
-kubectl label node <node-1> siprec-role=recorder --overwrite
-kubectl taint node <node-1> siprec-role=recorder:NoSchedule --overwrite
-
-kubectl label node <node-2> siprec-role=recorder --overwrite
-kubectl taint node <node-2> siprec-role=recorder:NoSchedule --overwrite
+PVCs created directly by this chart are removed with the Helm release. Ensure
+recordings are uploaded or retain/copy the volumes before uninstalling.

@@ -1,39 +1,25 @@
-# siprec-stack Helm chart — default values
+# siprec-stack Helm chart defaults
 # Override with: helm install siprec-stack ./helm -f my-values.yaml
-#
-# Node type: c2-standard-4 (4 vCPU, 16 GiB RAM)
-# GKE allocatable (approximate, after kubelet/OS reservation):
-#   CPU    : ~3940m  (60m reserved by GKE node auto-provisioning)
-#   Memory : ~13.8Gi (eviction threshold + kubelet overhead)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SIPREC Recorder — streamlink
-#
-# Deployed as one node-pinned DaemonSet per configured recorder node. Each
-# node gets its own Internal passthrough LB VIP for SIP and RTP.
-#
-# Topology:
-#   SBC ──SIP/RTP──▶ node-specific Internal LB VIP
-#                              │  passthrough (Local, no SNAT)
-#                              ▼
-#                      assigned recorder node:5060 / :rtpPort
-#
-# There is no Kamailio proxy in front: SBCs talk directly to the per-node LB
-# VIP assigned to the target recorder node.
-#
-# Node preparation:
-#   kubectl label  node <recorder-node>  siprec-role=recorder
-#   kubectl taint  node <recorder-node>  siprec-role=recorder:NoSchedule
-#
-# Verify actual allocatable after labelling:
-#   kubectl get node <recorder-node> -o jsonpath='{.status.allocatable}'
-# ──────────────────────────────────────────────────────────────────────────────
+namespaceOverride: ""
+
+# Each entry renders an independent one-replica Deployment, ConfigMap, PVC,
+# and internal passthrough LoadBalancer Service. Add entries to scale the
+# recorder pool; do not scale an individual recorder Deployment.
 siprecRecorder:
   image:
     repository: us-central1-docker.pkg.dev/div-deai-cx-dev-usc1-ri/cx-sip/cx-streamlink-rec
     tag: "dev"
     pullPolicy: Always
 
+  instances:
+    - name: recorder-1
+      loadBalancerIP: "100.73.16.54"
+    - name: recorder-2
+      loadBalancerIP: "100.73.16.64"
+
+  # Optional recorder-pool placement. This does not pin an instance to a
+  # hostname, so multiple recorder pods can share a sufficiently large node.
   nodeSelector:
     siprec-role: recorder
 
@@ -43,148 +29,93 @@ siprecRecorder:
       value: recorder
       effect: NoSchedule
 
-  # ── Recorder nodes ──────────────────────────────────────────────────────────
-  # Static inventory of recorder nodes. The chart renders one node-pinned
-  # DaemonSet, one node-specific ConfigMap, and one Internal LoadBalancer
-  # Service per entry. Each loadBalancerIP should be pre-reserved in the VPC.
-  #
-  # Replace hostname with the node's actual kubernetes.io/hostname value:
-  #   kubectl get nodes --show-labels | grep kubernetes.io/hostname
-  nodes:
-    - name: recorder-1
-      hostname: gke-gc1dccsinsght01-gc1dccsinsght01-p-8e60d440-70co
-      # VIP advertised in SDP and used by the node-specific Internal NLB.
-      # Reserve with --purpose=SHARED_LOADBALANCER_VIP if an out-of-band RTP
-      # forwarding rule will share this address with the SIP Service.
-      loadBalancerIP: "100.73.16.5"
-    - name: recorder-2
-      hostname: gke-gc1dccsinsght01-gc1dccsinsght01-p-d1709551-mp30
-      loadBalancerIP: "100.73.16.64"
-
-  # ── Resource claim ──────────────────────────────────────────────────────────
-  # Node allocatable: 3920m CPU / ~12.96 GiB (13591716Ki).
-  # requests  — reserves enough to prevent competing pods from landing here.
-  # limits    — capped just below allocatable so the pod is always schedulable.
   resources:
     requests:
-      cpu: "2000m"
-      memory: "11Gi"
+      cpu: "500m"
+      memory: "1Gi"
     limits:
-      cpu: "2000m"
-      memory: "11Gi"
+      cpu: "500m"
+      memory: "1Gi"
 
-  updateStrategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
+  strategy:
+    type: Recreate
 
-  # Host path where recordings are staged before GCS upload.
-  # The directory is created automatically (type: DirectoryOrCreate).
-  recordingsHostPath: /var/lib/siprec/recordings
+  persistence:
+    enabled: true
+    accessModes:
+      - ReadWriteOnce
+    size: 20Gi
+    # Empty uses the cluster's default StorageClass.
+    storageClassName: ""
 
-  # ── Services fronting the DaemonSets ───────────────────────────────────────
-  # GKE Internal Passthrough Network Load Balancers (L4). One Service is
-  # rendered per siprecRecorder.nodes entry, accepts inbound SIPREC traffic on
-  # UDP/5060, and forwards only to that node's recorder pod via hostNetwork
-  # (externalTrafficPolicy: Local).
   service:
     type: LoadBalancer
     port: 5060
+    # Leave empty to use the annotation on older GKE versions. On supported
+    # clusters set networking.gke.io/l4-regional-internal.
+    loadBalancerClass: ""
+    loadBalancerSourceRanges: []
     annotations:
-      # Internal NLB — private VPC only, no public internet exposure.
       networking.gke.io/load-balancer-type: "Internal"
-      # Optional: pin the NLB to a specific subnet.
-      # networking.gke.io/internal-load-balancer-subnet: "your-subnet-name"
-      # Optional: allow-list source CIDRs (SBC address ranges).
-      # networking.gke.io/load-balancer-source-ranges: "10.0.0.0/8,172.16.0.0/12"
 
-  # ── GCP authentication ────────────────────────────────────────────────────
-  #
-  # Option A — Workload Identity (recommended for GKE, no secrets required)
-  # -------------------------------------------------------------------------
-  # 1. Create a GCP IAM Service Account (GSA) and grant it Storage Object
-  #    Creator on both GCS buckets:
-  #      gcloud iam service-accounts create siprec-recorder \
-  #        --project=YOUR_PROJECT
-  #      gcloud projects add-iam-policy-binding YOUR_PROJECT \
-  #        --member="serviceAccount:siprec-recorder@YOUR_PROJECT.iam.gserviceaccount.com" \
-  #        --role="roles/storage.objectCreator"
-  #
-  # 2. Bind the GSA to the Kubernetes ServiceAccount (KSA) that this chart
-  #    creates (name = release-name + "-siprec-recorder"):
-  #      gcloud iam service-accounts add-iam-policy-binding \
-  #        siprec-recorder@YOUR_PROJECT.iam.gserviceaccount.com \
-  #        --role="roles/iam.workloadIdentityUser" \
-  #        --member="serviceAccount:YOUR_PROJECT.svc.id.goog[NAMESPACE/RELEASE-siprec-recorder]"
-  #
-  # 3. Enable Workload Identity on the GKE node pool if not already enabled.
-  #
-  # 4. Set workloadIdentity.gcpServiceAccount below; leave credentialsSecret
-  #    empty.
-  #
-  # Option B — Service-account JSON key (no Workload Identity needed)
-  # -------------------------------------------------------------------------
-  # 1. Create and download a JSON key for the GSA:
-  #      gcloud iam service-accounts keys create sa-key.json \
-  #        --iam-account=siprec-recorder@YOUR_PROJECT.iam.gserviceaccount.com
-  #
-  # 2. Store it as a Kubernetes Secret:
-  #      kubectl create secret generic siprec-gcp-credentials \
-  #        --namespace=YOUR_NAMESPACE \
-  #        --from-file=key.json=./sa-key.json
-  #
-  # 3. Set credentialsSecret.name below; leave workloadIdentity empty.
-  #
   gcp:
-    # Workload Identity — GCP IAM Service Account email to bind to the pod's KSA.
-    # Mutually exclusive with credentialsSecret; leave empty when using Option B.
     workloadIdentity:
       gcpServiceAccount: "adtgcp-css-dev-insight-sa@adtgcp-cnt-dev-css-tlcm-fe10.iam.gserviceaccount.com"
 
-    # JSON key Secret — name of a Kubernetes Secret containing the key file.
-    # Mutually exclusive with workloadIdentity; leave empty when using Option A.
     credentialsSecret:
-      name: ""        # e.g. siprec-gcp-credentials
-      key: "key.json" # key inside the Secret that holds the JSON content
+      name: ""
+      key: "key.json"
 
-  # ── Recorder config (rendered into /app/config.yaml inside the pod) ────────
   config:
     sipListenAddr: "0.0.0.0:5060"
-
-    # media_ip is rendered per node from siprecRecorder.nodes[].loadBalancerIP.
-    # That address is stamped into the SDP "c=" line of the 200 OK answer —
-    # i.e. the IP the SBC will send RTP to. We deliberately advertise the
-    # node-specific Internal Passthrough NLB VIP, NOT the recorder's own node IP:
-    #
-    #   SBC ──RTP──▶ node-specific NLB VIP
-    #                         │  passthrough, preserves dst port
-    #                         ▼
-    #                   assigned recorder node:<rtpPort>
-    #
-    # Each per-node VIP needs an out-of-band GCP forwarding rule for the full
-    # rtpPortStart–rtpPortEnd UDP range in addition to the Kubernetes-managed
-    # SIP/5060 Service. Plain Kubernetes Services cannot express this large
-    # UDP range.
-    #
-    # RTP port range.  Each concurrent SIPREC session consumes 2 UDP ports
-    # (one per audio leg).  10000–30000 = 20 000 ports = up to 10 000 sessions,
-    # which is well within what a single c2-standard-4 can sustain CPU-wise.
+    # The recorder allocates even RTP ports. The chart exposes every even port
+    # in this inclusive range. At most 99 RTP ports are allowed because GKE
+    # supports at most 100 Service ports including SIP/5060.
     rtpPortStart: 10000
     rtpPortEnd: 30000
-
     recordingDir: "/app/recordings"
-
-    # GCS — audio recordings (leave gcsBucket empty to keep on local disk only)
     gcsBucket: "cx-siprec-audio-raw"
     gcsObjectPrefix: "rec"
-
-    # GCS — per-call metadata JSON files (separate bucket from recordings)
     gcsMetadataBucket: "cx-siprec-metadata"
     gcsMetadataObjectPrefix: "metadata"
-
     deleteAfterUpload: true
-
     uploadWorkers: 4
     uploadMaxRetries: 5
     uploadSweepIntervalSec: 60
     shutdownUploadTimeoutSec: 30
+
+# Stateless SIPREC signaling proxy. Its dispatcher destinations are generated
+# from siprecRecorder.instances and use the recorder Service cluster DNS names.
+kamailio:
+  image:
+    repository: ghcr.io/kamailio/kamailio
+    tag: "6.0.7-bookworm"
+    pullPolicy: IfNotPresent
+
+  replicaCount: 1
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  service:
+    type: LoadBalancer
+    port: 5060
+    loadBalancerIP: "100.73.16.5"
+    loadBalancerClass: ""
+    loadBalancerSourceRanges: []
+    annotations:
+      networking.gke.io/load-balancer-type: "Internal"
+
+  config:
+    debug: 2
+    children: 4
+    dispatcherPingInterval: 10

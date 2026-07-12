@@ -1,0 +1,118 @@
+{{- $root := . }}
+{{- range $index, $instance := $root.Values.siprecRecorder.instances }}
+{{- $instanceCtx := dict "root" $root "instance" $instance }}
+{{- $persistence := deepCopy $root.Values.siprecRecorder.persistence }}
+{{- with $instance.persistence }}
+{{- $persistence = mergeOverwrite $persistence . }}
+{{- end }}
+{{- if $index }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "siprec.instanceFullname" $instanceCtx }}
+  namespace: {{ include "siprec-stack.namespace" $root }}
+  labels:
+    {{- include "siprec.labels" $root | nindent 4 }}
+    siprec-stack/recorder-instance: {{ include "siprec.instanceName" $instance | quote }}
+  annotations:
+    siprec-stack/role: "siprec-recorder"
+    siprec-stack/scaling: "one-deployment-per-recorder"
+spec:
+  # A recorder owns one VIP, one session store, and one RWO volume. Scale the
+  # pool by adding instances, never by increasing this replica count.
+  replicas: 1
+  strategy:
+    type: {{ $root.Values.siprecRecorder.strategy.type }}
+  selector:
+    matchLabels:
+      {{- include "siprec.instanceSelectorLabels" $instanceCtx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "siprec.labels" $root | nindent 8 }}
+        siprec-stack/recorder-instance: {{ include "siprec.instanceName" $instance | quote }}
+      annotations:
+        checksum/siprec-config: {{ printf "%s:%s:%s" (toJson $root.Values.siprecRecorder.config) (required (printf "siprecRecorder.instances[%d].loadBalancerIP is required" $index) $instance.loadBalancerIP) (toJson $root.Values.siprecRecorder.gcp.credentialsSecret) | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "siprec.serviceAccountName" $root }}
+      terminationGracePeriodSeconds: 60
+      {{- with $root.Values.siprecRecorder.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.siprecRecorder.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: false
+      initContainers:
+        - name: fix-recordings-permissions
+          image: busybox:1.36
+          command: ["/bin/sh", "-c", "chmod 0777 /mnt/recordings"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: recordings
+              mountPath: /mnt/recordings
+      containers:
+        - name: siprec-recorder
+          image: "{{ $root.Values.siprecRecorder.image.repository }}:{{ $root.Values.siprecRecorder.image.tag }}"
+          imagePullPolicy: {{ $root.Values.siprecRecorder.image.pullPolicy }}
+          resources:
+            {{- toYaml $root.Values.siprecRecorder.resources | nindent 12 }}
+          ports:
+            - name: sip-udp
+              containerPort: {{ $root.Values.siprecRecorder.service.port }}
+              protocol: UDP
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "kill -0 1 && grep -q siprec-recorder /proc/1/cmdline"
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "kill -0 1 && grep -q siprec-recorder /proc/1/cmdline"
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: siprec-config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: recordings
+              mountPath: /app/recordings
+            {{- if $root.Values.siprecRecorder.gcp.credentialsSecret.name }}
+            - name: gcp-credentials
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: siprec-config
+          configMap:
+            name: {{ include "siprec.instanceFullname" $instanceCtx }}-config
+        - name: recordings
+          {{- if $persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "siprec.instancePVCName" $instanceCtx }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if $root.Values.siprecRecorder.gcp.credentialsSecret.name }}
+        - name: gcp-credentials
+          secret:
+            secretName: {{ $root.Values.siprecRecorder.gcp.credentialsSecret.name }}
+        {{- end }}
+{{- end }}

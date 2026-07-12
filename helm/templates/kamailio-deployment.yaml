@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kamailio.fullname" . }}
+  namespace: {{ include "siprec-stack.namespace" . }}
+  labels:
+    {{- include "kamailio.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.kamailio.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "kamailio.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kamailio.labels" . | nindent 8 }}
+      annotations:
+        checksum/kamailio-config: {{ printf "%s:%s" (toJson .Values.kamailio.config) (toJson .Values.siprecRecorder.instances) | sha256sum }}
+    spec:
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.kamailio.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.kamailio.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.kamailio.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: kamailio
+          image: "{{ .Values.kamailio.image.repository }}:{{ .Values.kamailio.image.tag }}"
+          imagePullPolicy: {{ .Values.kamailio.image.pullPolicy }}
+          command:
+            - kamailio
+          args:
+            - -DD
+            - -E
+            - -f
+            - /etc/kamailio/kamailio.cfg
+          resources:
+            {{- toYaml .Values.kamailio.resources | nindent 12 }}
+          ports:
+            - name: sip-udp
+              containerPort: {{ .Values.kamailio.service.port }}
+              protocol: UDP
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "kill -0 1 && grep -q kamailio /proc/1/cmdline"
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "kill -0 1 && grep -q kamailio /proc/1/cmdline"
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: kamailio-config
+              mountPath: /etc/kamailio/kamailio.cfg
+              subPath: kamailio.cfg
+              readOnly: true
+            - name: kamailio-config
+              mountPath: /etc/kamailio/dispatcher.list
+              subPath: dispatcher.list
+              readOnly: true
+      volumes:
+        - name: kamailio-config
+          configMap:
+            name: {{ include "kamailio.fullname" . }}-config

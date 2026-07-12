@@ -1,68 +1,46 @@
 {{- $root := . }}
-{{ range $index, $node := $root.Values.siprecRecorder.nodes }}
-{{ $nodeCtx := dict "root" $root "node" $node }}
+{{ range $index, $instance := $root.Values.siprecRecorder.instances }}
+{{ $instanceCtx := dict "root" $root "instance" $instance }}
 {{ if $index }}
 ---
 {{ end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "siprec.nodeFullname" $nodeCtx }}-config
+  name: {{ include "siprec.instanceFullname" $instanceCtx }}-config
   namespace: {{ include "siprec-stack.namespace" $root }}
   labels:
     {{- include "siprec.labels" $root | nindent 4 }}
-    siprec-stack/recorder-node: {{ include "siprec.nodeName" $node | quote }}
+    siprec-stack/recorder-instance: {{ include "siprec.instanceName" $instance | quote }}
 data:
-  # Rendered from .Values.siprecRecorder.config and mounted at /app/config.yaml
-  # inside this node's recorder pod.
   config.yaml: |
-    # SIPREC Recorder configuration — managed by Helm, do not edit manually.
-
-    # SIP listen address.  0.0.0.0 works correctly with hostNetwork=true because
-    # the pod inherits all of the node's network interfaces.
+    # SIPREC recorder configuration -- managed by Helm.
     sip_listen_addr: "{{ $root.Values.siprecRecorder.config.sipListenAddr }}"
 
-    # Node-specific Internal passthrough LB VIP advertised in SDP answers for RTP.
-    media_ip: "{{ required (printf "siprecRecorder.nodes[%d].loadBalancerIP is required" $index) $node.loadBalancerIP }}"
+    # This instance's internal passthrough NLB VIP is advertised in SDP.
+    media_ip: "{{ required (printf "siprecRecorder.instances[%d].loadBalancerIP is required" $index) $instance.loadBalancerIP }}"
 
-    # RTP port range (inclusive).  Each concurrent SIPREC session consumes 2 ports
-    # (one per audio leg).  Default 10000–30000 covers up to 10 000 sessions on
-    # a c2-standard-4 node.
+    # The application allocates even RTP ports from this inclusive range.
     rtp_port_start: {{ $root.Values.siprecRecorder.config.rtpPortStart }}
     rtp_port_end:   {{ $root.Values.siprecRecorder.config.rtpPortEnd }}
 
-    # Directory where .ulaw recording files are staged before upload.
-    # Mounted from hostPath {{ $root.Values.siprecRecorder.recordingsHostPath }}
-    # so recordings survive pod restarts.
     recording_dir: "{{ $root.Values.siprecRecorder.config.recordingDir }}"
 
-    # GCP credentials file path.
-    # Option A (Workload Identity): leave empty — ADC picks up WI automatically.
-    # Option B (JSON key Secret):   auto-populated from the mounted Secret path.
 {{ if $root.Values.siprecRecorder.gcp.credentialsSecret.name }}
     gcp_credentials_file: "/var/secrets/google/{{ $root.Values.siprecRecorder.gcp.credentialsSecret.key }}"
 {{ else }}
     gcp_credentials_file: ""
 {{ end }}
 
-    # GCS — audio recordings (leave gcs_bucket empty to keep on local disk only).
     gcs_bucket:        "{{ $root.Values.siprecRecorder.config.gcsBucket }}"
     gcs_object_prefix: "{{ $root.Values.siprecRecorder.config.gcsObjectPrefix }}"
 
-    # GCS — per-call metadata JSON files (separate bucket from recordings).
     gcs_metadata_bucket:        "{{ $root.Values.siprecRecorder.config.gcsMetadataBucket }}"
     gcs_metadata_object_prefix: "{{ $root.Values.siprecRecorder.config.gcsMetadataObjectPrefix }}"
 
-    # Remove local file only after a confirmed successful GCS upload.
     delete_after_upload: {{ $root.Values.siprecRecorder.config.deleteAfterUpload }}
-
-    # Concurrent GCS upload workers per pod.
     upload_workers:      {{ $root.Values.siprecRecorder.config.uploadWorkers }}
     upload_max_retries:  {{ $root.Values.siprecRecorder.config.uploadMaxRetries }}
-
-    # How often the recording directory is scanned for orphaned/failed files (seconds).
     upload_sweep_interval_sec:   {{ $root.Values.siprecRecorder.config.uploadSweepIntervalSec }}
-
-    # Maximum time to wait for in-flight uploads during graceful shutdown (seconds).
     shutdown_upload_timeout_sec: {{ $root.Values.siprecRecorder.config.shutdownUploadTimeoutSec }}
 {{ end }}

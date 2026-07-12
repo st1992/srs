@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kamailio.fullname" . }}
+  namespace: {{ include "siprec-stack.namespace" . }}
+  labels:
+    {{- include "kamailio.labels" . | nindent 4 }}
+  annotations:
+    siprec-stack/purpose: "kamailio-loadbalancer"
+    {{- with .Values.kamailio.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: {{ .Values.kamailio.service.type }}
+  {{- if eq .Values.kamailio.service.type "LoadBalancer" }}
+  loadBalancerIP: {{ required "kamailio.service.loadBalancerIP is required" .Values.kamailio.service.loadBalancerIP | quote }}
+  {{- with .Values.kamailio.service.loadBalancerClass }}
+  loadBalancerClass: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.kamailio.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  externalTrafficPolicy: Local
+  {{- end }}
+  selector:
+    {{- include "kamailio.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: sip-udp
+      port: {{ .Values.kamailio.service.port }}
+      targetPort: sip-udp
+      protocol: UDP

@@ -1,0 +1,155 @@
+{{- $root := . }}
+{{- $kamailioVIP := required "kamailio.service.loadBalancerIP is required because Kamailio advertises it in SIP headers" $root.Values.kamailio.service.loadBalancerIP }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kamailio.fullname" $root }}-config
+  namespace: {{ include "siprec-stack.namespace" $root }}
+  labels:
+    {{- include "kamailio.labels" $root | nindent 4 }}
+data:
+  dispatcher.list: |
+    # setid destination_uri flags priority attrs
+{{ range $instance := $root.Values.siprecRecorder.instances }}
+{{- $instanceCtx := dict "root" $root "instance" $instance }}
+    1 sip:{{ include "siprec.instanceFullname" $instanceCtx }}.{{ include "siprec-stack.namespace" $root }}.svc.cluster.local:{{ $root.Values.siprecRecorder.service.port }} 0 0
+{{ end }}
+  kamailio.cfg: |
+    #!KAMAILIO
+
+    ####### Global Parameters #########
+
+    debug={{ $root.Values.kamailio.config.debug }}
+    log_stderror=yes
+    log_facility=LOG_LOCAL0
+    log_prefix="[$time(%Y-%m-%d %H:%M:%S)] "
+
+    fork=yes
+    children={{ $root.Values.kamailio.config.children }}
+
+    disable_tcp=yes
+    auto_aliases=no
+
+    # The GKE internal passthrough NLB preserves the destination VIP. Advertise
+    # that stable address in Via and Record-Route while binding every pod IP.
+    listen=udp:0.0.0.0:{{ $root.Values.kamailio.service.port }} advertise {{ $kamailioVIP }}:{{ $root.Values.kamailio.service.port }}
+    alias="{{ $kamailioVIP }}"
+
+    server_signature=no
+    server_header="Server: EXL Streamlink"
+    user_agent_header="User-Agent: EXL Streamlink"
+
+    ####### Modules #########
+
+    loadmodule "tm.so"
+    loadmodule "sl.so"
+    loadmodule "rr.so"
+    loadmodule "pv.so"
+    loadmodule "maxfwd.so"
+    loadmodule "textops.so"
+    loadmodule "textopsx.so"
+    loadmodule "siputils.so"
+    loadmodule "sanity.so"
+    loadmodule "dispatcher.so"
+    loadmodule "xlog.so"
+
+    ####### Module parameters #########
+
+    modparam("tm", "fr_timer", 5000)
+    modparam("tm", "fr_inv_timer", 30000)
+
+    modparam("rr", "enable_full_lr", 1)
+    modparam("rr", "append_fromtag", 0)
+
+    modparam("dispatcher", "list_file", "/etc/kamailio/dispatcher.list")
+    modparam("dispatcher", "ds_ping_method", "OPTIONS")
+    modparam("dispatcher", "ds_ping_from", "sip:healthcheck@exlstreamlink")
+    modparam("dispatcher", "ds_ping_interval", {{ $root.Values.kamailio.config.dispatcherPingInterval }})
+    modparam("dispatcher", "ds_probing_mode", 1)
+    modparam("dispatcher", "ds_probing_threshold", 3)
+
+    ####### Routing Logic #########
+
+    request_route {
+        route(REQINIT);
+
+        if (has_totag()) {
+            route(WITHINDLG);
+            exit;
+        }
+
+        if (is_method("CANCEL")) {
+            if (t_check_trans()) {
+                t_relay();
+            }
+            exit;
+        }
+
+        t_check_trans();
+
+        # Algorithm 4 is round-robin in Kamailio 6.0.
+        if (!ds_select_dst("1", "4")) {
+            xlog("L_ERR", "no SRS destination available for $rm $ru, Call-ID $ci\n");
+            sl_send_reply("503", "No recording server available");
+            exit;
+        }
+
+        # Persist the selected recorder Service URI in the route set so any
+        # Kamailio replica can route subsequent requests in the same dialog.
+        add_rr_param(";srs=$du");
+        record_route();
+
+        xlog("L_INFO", "NEW SIPREC dialog Call-ID=$ci -> $du\n");
+        route(RELAY);
+        exit;
+    }
+
+    route[REQINIT] {
+        if (!sanity_check("1511", "7")) {
+            xlog("L_WARN", "malformed SIP message from $si:$sp\n");
+            exit;
+        }
+        if (!mf_process_maxfwd_header(10)) {
+            sl_send_reply("483", "Too Many Hops");
+            exit;
+        }
+        if (is_method("OPTIONS") && uri == myself && $rU == $null) {
+            sl_send_reply("200", "OK");
+            exit;
+        }
+    }
+
+    route[WITHINDLG] {
+        $var(srs) = $null;
+        if ($hdr(Route) != $null) {
+            $var(srs) = $(hdr(Route){uri.param,srs});
+        }
+
+        if (!loose_route()) {
+            if (is_method("ACK")) {
+                exit;
+            }
+            sl_send_reply("404", "Not Found (no matching dialog)");
+            exit;
+        }
+
+        if ($var(srs) != $null) {
+            $du = $var(srs);
+        } else {
+            xlog("L_WARN", "in-dialog $rm, Call-ID $ci: no srs Route parameter\n");
+        }
+
+        route(RELAY);
+        exit;
+    }
+
+    route[RELAY] {
+        if (!t_relay()) {
+            sl_reply_error();
+        }
+        exit;
+    }
+
+    onreply_route {
+        # SIP responses and SIPREC multipart bodies pass through unchanged.
+    }
