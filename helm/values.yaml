@@ -69,9 +69,9 @@ recorder:
     rtpPortStart: 10000
     rtpPortEnd: 30000
     recordingDir: "/app/recordings"
-    gcsBucket: "cx-streamlink-audio-raw"
+    gcsBucket: "cx-siprec-audio-raw"
     gcsObjectPrefix: "rec"
-    gcsMetadataBucket: "cx-streamlink-metadata"
+    gcsMetadataBucket: "cx-siprec-metadata"
     gcsMetadataObjectPrefix: "metadata"
     deleteAfterUpload: true
     uploadWorkers: 4
