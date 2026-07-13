@@ -53,9 +53,6 @@ siprecRecorder:
       # Reserve with --purpose=SHARED_LOADBALANCER_VIP if an out-of-band RTP
       # forwarding rule will share this address with the SIP Service.
       loadBalancerIP: "100.73.16.5"
-    - name: recorder-2
-      hostname: gke-gc1dccsinsght01-gc1dccsinsght01-p-d1709551-mp30
-      loadBalancerIP: "100.73.16.64"
 
   # ── Resource claim ──────────────────────────────────────────────────────────
   # Node allocatable: 3920m CPU / ~12.96 GiB (13591716Ki).
