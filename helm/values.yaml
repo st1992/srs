@@ -35,13 +35,9 @@ siprecRecorder:
     pullPolicy: Always
 
   nodeSelector:
-    siprec-role: recorder
+    node.kubernetes.io/instance-type: c2-standard-4
 
-  tolerations:
-    - key: siprec-role
-      operator: Equal
-      value: recorder
-      effect: NoSchedule
+  tolerations: []
 
   # ── Recorder nodes ──────────────────────────────────────────────────────────
   # Static inventory of recorder nodes. The chart renders one node-pinned
