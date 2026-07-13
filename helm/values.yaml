@@ -83,8 +83,8 @@ siprecRecorder:
 # from siprecRecorder.instances and use the recorder Service cluster DNS names.
 kamailio:
   image:
-    repository: ghcr.io/kamailio/kamailio
-    tag: "6.0.7-bookworm"
+    repository: kamailio-sngrep
+    tag: "6.0.7"
     pullPolicy: IfNotPresent
 
   replicaCount: 1
