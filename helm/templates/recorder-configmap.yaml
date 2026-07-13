@@ -15,7 +15,7 @@ metadata:
 data:
   config.yaml: |
     # Streamlink recorder configuration -- managed by Helm.
-    sip_listen_addr: "{{ $root.Values.recorder.config.sipListenAddr }}"
+    sip_listen_addr: "{{ $root.Values.recorder.config.sipListenIP }}:{{ required (printf "recorder.instances[%d].sipPort is required" $index) $instance.sipPort }}"
 
     # This instance's internal passthrough NLB VIP is advertised in SDP.
     media_ip: "{{ required (printf "recorder.instances[%d].loadBalancerIP is required" $index) $instance.loadBalancerIP }}"

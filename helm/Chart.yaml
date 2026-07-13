@@ -1,7 +1,7 @@
 apiVersion: v2
 name: cx-streamlink
 description: >
-  Streamlink signaling proxy and independently scheduled recorder Deployments
+  Streamlink signaling proxy and co-located host-network recorder Deployments
   with per-recorder GKE Internal Passthrough NLBs.
 type: application
 version: 0.5.1

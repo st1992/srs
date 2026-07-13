@@ -1,7 +1,7 @@
 # cx-streamlink Helm chart
 
-Deploys a Streamlink signaling proxy and a configurable pool of independently
-scheduled Streamlink recorders on GKE.
+Deploys a Streamlink signaling proxy and a configurable pool of host-network
+Streamlink recorders on GKE.
 
 ## Architecture
 
@@ -30,6 +30,10 @@ internal passthrough `LoadBalancer` Service with a reserved VIP. Scale the
 recorder pool by adding instances, not by increasing an individual
 Deployment's replica count.
 
+Recorder pods use the host network and are co-located on one node by default.
+Each instance has a unique SIP listen port, while all instances share the
+node-wide even RTP port pool from `10000` through `30000`.
+
 The proxy uses dispatcher round-robin selection for new dialogs. Dispatcher
 entries are generated from recorder Service FQDNs, and in-dialog requests
 return to the same recorder.
@@ -56,7 +60,9 @@ releases would attempt to own the same fixed names.
 - One reserved regional internal IPv4 address per recorder instance.
 - A default StorageClass, or an explicit recorder storage class.
 - Firewall reachability from recording sources to UDP/5060 on the proxy VIP
-  and to the configured RTP UDP ports on every recorder VIP.
+  and UDP/10000-30000 on every recorder VIP and recorder backend node.
+- No other host-network workload using the configured recorder SIP or RTP
+  ports on the selected node.
 - GCS permissions configured with Workload Identity or a Secret if recordings
   are uploaded.
 
@@ -90,10 +96,15 @@ recorder:
   instances:
     - name: recorder-1
       loadBalancerIP: "100.73.16.5"
+      sipPort: 5060
     - name: recorder-2
       loadBalancerIP: "100.73.16.64"
+      sipPort: 5061
       persistence:
         size: 50Gi
+
+  hostNetwork: true
+  coLocateOnSameNode: true
 
   nodeSelector:
     node.kubernetes.io/instance-type: c2-standard-4
@@ -111,7 +122,7 @@ recorder:
 
   config:
     rtpPortStart: 10000
-    rtpPortEnd: 10196
+    rtpPortEnd: 30000
     gcsBucket: "my-recordings-bucket"
     gcsMetadataBucket: "my-metadata-bucket"
 ```
@@ -132,6 +143,30 @@ recorder:
 Leave `loadBalancerClass` empty on older clusters; the
 `networking.gke.io/load-balancer-type: Internal` annotation is enabled by
 default.
+
+## Host-network RTP routing
+
+GKE supports at most 100 declared ports on a LoadBalancer Service, so the chart
+does not declare all 10,001 even ports in `10000-30000`. Instead, each recorder
+Service declares SIP plus five RTP ports. More than five total Service ports
+makes GKE configure the internal passthrough Network Load Balancer forwarding
+rule in all-ports mode.
+
+GKE's generated firewall rule permits only the ports explicitly listed on the
+Service. A separate VPC ingress firewall rule must allow UDP/10000-30000 from
+the recording-source ranges to the recorder backend nodes.
+
+Because recorder pods share the host network:
+
+- every instance must use a unique `sipPort`;
+- RTP ports are allocated from one node-wide shared pool;
+- two active recorder sockets cannot use the same RTP port simultaneously; and
+- `coLocateOnSameNode: true` keeps all recorder instances on one node. Set it to
+  `false` only when each node is prepared to receive the all-ports VIP traffic.
+
+The recorder Services continue to expose SIP on port 5060. Kubernetes maps
+that stable Service port to each instance's host SIP port, so proxy dispatcher
+destinations do not need instance-specific SIP ports.
 
 ## GCP authentication
 
@@ -206,7 +241,8 @@ replacements before applying the upgrade.
 ## Scaling
 
 To add recording capacity, append another item to `recorder.instances`, reserve
-its VIP, and upgrade the release. Scale proxy replicas with
+its VIP, assign a unique `sipPort`, and upgrade the release. All co-located
+recorders share the same RTP range and node capacity. Scale proxy replicas with
 `proxy.replicaCount`.
 
 ## Verify
@@ -225,6 +261,10 @@ kubectl get deploy,pod,pvc,svc -n voice
 kubectl get svc -n voice -l app.kubernetes.io/name=cx-streamlink-rec
 kubectl logs -n voice -l app.kubernetes.io/name=cx-streamlink-proxy --follow
 ```
+
+Each recorder Service should show six UDP ports. This is expected: GKE uses
+those six declarations to create an all-ports forwarding rule. Verify that rule
+in GCP and separately verify the UDP/10000-30000 VPC firewall rule.
 
 The proxy ConfigMap should contain one dispatcher line per recorder:
 

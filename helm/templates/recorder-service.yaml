@@ -1,14 +1,43 @@
 {{- $root := . }}
+{{- if not $root.Values.recorder.hostNetwork }}
+{{- fail "recorder.hostNetwork must be true when exposing the full RTP range through an all-ports load balancer" }}
+{{- end }}
+{{- $rtpPortStart := int $root.Values.recorder.config.rtpPortStart }}
+{{- $rtpPortEnd := int $root.Values.recorder.config.rtpPortEnd }}
+{{- if or (le $rtpPortStart 0) (gt $rtpPortEnd 65535) (gt $rtpPortStart $rtpPortEnd) }}
+{{- fail "recorder RTP range must be within 1-65535 and start must not exceed end" }}
+{{- end }}
+{{- if or (ne (mod $rtpPortStart 2) 0) (ne (mod $rtpPortEnd 2) 0) }}
+{{- fail "recorder.config.rtpPortStart and rtpPortEnd must be even" }}
+{{- end }}
+{{- if lt $rtpPortEnd (int (add $rtpPortStart 8)) }}
+{{- fail "recorder RTP range must contain at least five even ports" }}
+{{- end }}
+{{- $allPortsTriggers := untilStep $rtpPortStart (int (add $rtpPortStart 10)) 2 }}
 {{- $instanceNames := dict }}
+{{- $sipPorts := dict }}
 {{- range $index, $instance := $root.Values.recorder.instances }}
 {{- $instanceName := include "recorder.instanceName" $instance }}
 {{- if hasKey $instanceNames $instanceName }}
 {{- fail (printf "recorder.instances[%d].name normalizes to duplicate name %q" $index $instanceName) }}
 {{- end }}
 {{- $_ := set $instanceNames $instanceName true }}
+{{- $sipPort := int (required (printf "recorder.instances[%d].sipPort is required" $index) $instance.sipPort) }}
+{{- if or (le $sipPort 0) (gt $sipPort 65535) }}
+{{- fail (printf "recorder.instances[%d].sipPort must be within 1-65535" $index) }}
+{{- end }}
+{{- if and (ge $sipPort $rtpPortStart) (le $sipPort $rtpPortEnd) }}
+{{- fail (printf "recorder.instances[%d].sipPort must be outside the RTP range" $index) }}
+{{- end }}
+{{- $sipPortKey := printf "%d" $sipPort }}
+{{- if hasKey $sipPorts $sipPortKey }}
+{{- fail (printf "recorder.instances[%d].sipPort %d is already used by another host-network recorder" $index $sipPort) }}
+{{- end }}
+{{- $_ := set $sipPorts $sipPortKey true }}
 {{- end }}
 {{ range $index, $instance := $root.Values.recorder.instances }}
 {{ $instanceCtx := dict "root" $root "instance" $instance }}
+{{ $sipPort := int $instance.sipPort }}
 {{ if $index }}
 ---
 {{ end }}
@@ -47,6 +76,15 @@ spec:
   ports:
     - name: sip-udp
       port: {{ $root.Values.recorder.service.port }}
-      targetPort: sip-udp
+      targetPort: {{ $sipPort }}
       protocol: UDP
+    # More than five declared ports makes GKE manage the internal passthrough
+    # NLB forwarding rule in all-ports mode. Host-network recorder sockets
+    # receive the remaining RTP ports directly on the backend node.
+{{ range $rtpPort := $allPortsTriggers }}
+    - name: rtp-{{ $rtpPort }}
+      port: {{ $rtpPort }}
+      targetPort: {{ $rtpPort }}
+      protocol: UDP
+{{ end }}
 {{ end }}

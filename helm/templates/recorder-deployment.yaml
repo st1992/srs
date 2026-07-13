@@ -1,6 +1,7 @@
 {{- $root := . }}
 {{- range $index, $instance := $root.Values.recorder.instances }}
 {{- $instanceCtx := dict "root" $root "instance" $instance }}
+{{- $sipPort := int (required (printf "recorder.instances[%d].sipPort is required" $index) $instance.sipPort) }}
 {{- $persistence := deepCopy $root.Values.recorder.persistence }}
 {{- with $instance.persistence }}
 {{- $persistence = mergeOverwrite $persistence . }}
@@ -34,10 +35,23 @@ spec:
         {{- include "recorder.labels" $root | nindent 8 }}
         cx-streamlink/recorder-instance: {{ include "recorder.instanceName" $instance | quote }}
       annotations:
-        checksum/recorder-config: {{ printf "%s:%s:%s" (toJson $root.Values.recorder.config) (required (printf "recorder.instances[%d].loadBalancerIP is required" $index) $instance.loadBalancerIP) (toJson $root.Values.recorder.gcp.credentialsSecret) | sha256sum }}
+        checksum/recorder-config: {{ printf "%s:%s:%d:%s" (toJson $root.Values.recorder.config) (required (printf "recorder.instances[%d].loadBalancerIP is required" $index) $instance.loadBalancerIP) $sipPort (toJson $root.Values.recorder.gcp.credentialsSecret) | sha256sum }}
     spec:
       serviceAccountName: {{ include "recorder.serviceAccountName" $root }}
+      hostNetwork: {{ $root.Values.recorder.hostNetwork }}
+      {{- if $root.Values.recorder.hostNetwork }}
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
       terminationGracePeriodSeconds: 60
+      {{- if $root.Values.recorder.coLocateOnSameNode }}
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "recorder.selectorLabels" $root | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+      {{- end }}
       {{- with $root.Values.recorder.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -70,7 +84,7 @@ spec:
             {{- toYaml $root.Values.recorder.resources | nindent 12 }}
           ports:
             - name: sip-udp
-              containerPort: {{ $root.Values.recorder.service.port }}
+              containerPort: {{ $sipPort }}
               protocol: UDP
           livenessProbe:
             exec:

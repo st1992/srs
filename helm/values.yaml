@@ -15,8 +15,15 @@ recorder:
   instances:
     - name: recorder-1
       loadBalancerIP: "100.73.16.54"
+      sipPort: 5060
     - name: recorder-2
       loadBalancerIP: "100.73.16.64"
+      sipPort: 5061
+
+  # Recorder pods share the node network namespace. SIP ports must be unique
+  # per instance; dynamically allocated RTP ports share one node-wide pool.
+  hostNetwork: true
+  coLocateOnSameNode: true
 
   # Schedule recorder pods only on c2-standard-4 nodes.
   nodeSelector:
@@ -62,10 +69,10 @@ recorder:
       key: "key.json"
 
   config:
-    sipListenAddr: "0.0.0.0:5060"
-    # The recorder allocates even RTP ports. The chart exposes every even port
-    # in this inclusive range. At most 99 RTP ports are allowed because GKE
-    # supports at most 100 Service ports including SIP/5060.
+    sipListenIP: "0.0.0.0"
+    # The recorder allocates even RTP ports from this node-wide shared range.
+    # Recorder Services declare enough ports to make GKE use an all-ports
+    # forwarding rule; a separate firewall rule must allow this full range.
     rtpPortStart: 10000
     rtpPortEnd: 30000
     recordingDir: "/app/recordings"
