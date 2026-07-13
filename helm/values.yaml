@@ -9,8 +9,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # SIPREC Recorder — streamlink
 #
-# Deployed as one node-pinned DaemonSet per configured recorder node. Each
-# node gets its own Internal passthrough LB VIP for SIP and RTP.
+# Deployed as a DaemonSet on nodes matching siprecRecorder.nodeSelector.
 #
 # Topology:
 #   SBC ──SIP/RTP──▶ node-specific Internal LB VIP
@@ -21,11 +20,7 @@
 # There is no Kamailio proxy in front: SBCs talk directly to the per-node LB
 # VIP assigned to the target recorder node.
 #
-# Node preparation:
-#   kubectl label  node <recorder-node>  siprec-role=recorder
-#   kubectl taint  node <recorder-node>  siprec-role=recorder:NoSchedule
-#
-# Verify actual allocatable after labelling:
+# Verify actual allocatable:
 #   kubectl get node <recorder-node> -o jsonpath='{.status.allocatable}'
 # ──────────────────────────────────────────────────────────────────────────────
 siprecRecorder:
@@ -44,11 +39,8 @@ siprecRecorder:
   # DaemonSet, one node-specific ConfigMap, and one Internal LoadBalancer
   # Service per entry. Each loadBalancerIP should be pre-reserved in the VPC.
   #
-  # Replace hostname with the node's actual kubernetes.io/hostname value:
-  #   kubectl get nodes --show-labels | grep kubernetes.io/hostname
   nodes:
     - name: recorder-1
-      hostname: gke-gc1dccsinsght01-gc1dccsinsght01-p-8e60d440-70co
       # VIP advertised in SDP and used by the node-specific Internal NLB.
       # Reserve with --purpose=SHARED_LOADBALANCER_VIP if an out-of-band RTP
       # forwarding rule will share this address with the SIP Service.

@@ -37,16 +37,15 @@ spec:
         checksum/siprec-config: {{ printf "%s:%s:%s" (toJson $root.Values.siprecRecorder.config) (required (printf "siprecRecorder.nodes[%d].loadBalancerIP is required" $index) $node.loadBalancerIP) (toJson $root.Values.siprecRecorder.gcp.credentialsSecret) | sha256sum }}
     spec:
       # ── Node placement ────────────────────────────────────────────────────
-      # Schedule exclusively on the configured recorder node.
-      # Tainting those nodes ensures no other user workloads land there:
-      #   kubectl taint node <node> siprec-role=recorder:NoSchedule
+      # Schedule on every node matching the configured machine type.
       nodeSelector:
 {{ with $root.Values.siprecRecorder.nodeSelector }}
 {{ toYaml . | nindent 8 }}
 {{ end }}
-        kubernetes.io/hostname: {{ required (printf "siprecRecorder.nodes[%d].hostname is required" $index) $node.hostname | quote }}
+      {{- with $root.Values.siprecRecorder.tolerations }}
       tolerations:
-        {{- toYaml $root.Values.siprecRecorder.tolerations | nindent 8 }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
 
       # ── GCP identity ──────────────────────────────────────────────────────
       # The ServiceAccount provides Workload Identity (Option A) or is simply
