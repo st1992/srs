@@ -106,9 +106,9 @@ siprecRecorder:
       persistence:
         size: 50Gi
 
-  # Optional pool-level placement; no hostname is required.
+  # Schedule recorder pods only on c2-standard-4 nodes.
   nodeSelector:
-    siprec-role: recorder
+    node.kubernetes.io/instance-type: c2-standard-4
 
   persistence:
     enabled: true

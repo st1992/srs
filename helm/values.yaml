@@ -18,16 +18,11 @@ siprecRecorder:
     - name: recorder-2
       loadBalancerIP: "100.73.16.64"
 
-  # Optional recorder-pool placement. This does not pin an instance to a
-  # hostname, so multiple recorder pods can share a sufficiently large node.
+  # Schedule recorder pods only on c2-standard-4 nodes.
   nodeSelector:
-    siprec-role: recorder
+    node.kubernetes.io/instance-type: c2-standard-4
 
-  tolerations:
-    - key: siprec-role
-      operator: Equal
-      value: recorder
-      effect: NoSchedule
+  tolerations: []
 
   resources:
     requests:
