@@ -87,7 +87,7 @@ kamailio:
     tag: "dev"
     pullPolicy: Always
 
-  replicaCount: 2
+  replicaCount: 1
 
   resources:
     requests:
