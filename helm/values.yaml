@@ -83,7 +83,7 @@ siprecRecorder:
 # from siprecRecorder.instances and use the recorder Service cluster DNS names.
 kamailio:
   image:
-    repository: us-central1-docker.pkg.dev/div-deai-cx-dev-usc1-ri/cx-sip/sip-lb
+    repository: us-central1-docker.pkg.dev/div-deai-cx-dev-usc1-ri/cx-sip/cx-streamlink-proxy
     tag: "dev"
     pullPolicy: Always
 
