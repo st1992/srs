@@ -1,0 +1,46 @@
+{{- $root := . }}
+{{ range $index, $instance := $root.Values.recorder.instances }}
+{{ $instanceCtx := dict "root" $root "instance" $instance }}
+{{ if $index }}
+---
+{{ end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "recorder.instanceFullname" $instanceCtx }}-config
+  namespace: {{ include "streamlink.namespace" $root }}
+  labels:
+    {{- include "recorder.labels" $root | nindent 4 }}
+    cx-streamlink/recorder-instance: {{ include "recorder.instanceName" $instance | quote }}
+data:
+  config.yaml: |
+    # Streamlink recorder configuration -- managed by Helm.
+    sip_listen_addr: "{{ $root.Values.recorder.config.sipListenAddr }}"
+
+    # This instance's internal passthrough NLB VIP is advertised in SDP.
+    media_ip: "{{ required (printf "recorder.instances[%d].loadBalancerIP is required" $index) $instance.loadBalancerIP }}"
+
+    # The application allocates even RTP ports from this inclusive range.
+    rtp_port_start: {{ $root.Values.recorder.config.rtpPortStart }}
+    rtp_port_end:   {{ $root.Values.recorder.config.rtpPortEnd }}
+
+    recording_dir: "{{ $root.Values.recorder.config.recordingDir }}"
+
+{{ if $root.Values.recorder.gcp.credentialsSecret.name }}
+    gcp_credentials_file: "/var/secrets/google/{{ $root.Values.recorder.gcp.credentialsSecret.key }}"
+{{ else }}
+    gcp_credentials_file: ""
+{{ end }}
+
+    gcs_bucket:        "{{ $root.Values.recorder.config.gcsBucket }}"
+    gcs_object_prefix: "{{ $root.Values.recorder.config.gcsObjectPrefix }}"
+
+    gcs_metadata_bucket:        "{{ $root.Values.recorder.config.gcsMetadataBucket }}"
+    gcs_metadata_object_prefix: "{{ $root.Values.recorder.config.gcsMetadataObjectPrefix }}"
+
+    delete_after_upload: {{ $root.Values.recorder.config.deleteAfterUpload }}
+    upload_workers:      {{ $root.Values.recorder.config.uploadWorkers }}
+    upload_max_retries:  {{ $root.Values.recorder.config.uploadMaxRetries }}
+    upload_sweep_interval_sec:   {{ $root.Values.recorder.config.uploadSweepIntervalSec }}
+    shutdown_upload_timeout_sec: {{ $root.Values.recorder.config.shutdownUploadTimeoutSec }}
+{{ end }}

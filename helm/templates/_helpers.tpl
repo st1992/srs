@@ -1,81 +1,81 @@
 {{/*
 Expand the release namespace, allowing an override via .Values.namespaceOverride.
 */}}
-{{- define "siprec-stack.namespace" -}}
+{{- define "streamlink.namespace" -}}
 {{- default .Release.Namespace .Values.namespaceOverride -}}
 {{- end }}
 
 {{/*
 Chart label, shared by all resources.
 */}}
-{{- define "siprec-stack.chartLabel" -}}
+{{- define "streamlink.chartLabel" -}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- end }}
 
-{{/* Labels applied to every SIPREC recorder resource. */}}
-{{- define "siprec.labels" -}}
-app.kubernetes.io/name: siprec-recorder
+{{/* Labels applied to every recorder resource. */}}
+{{- define "recorder.labels" -}}
+app.kubernetes.io/name: cx-streamlink-rec
 app.kubernetes.io/instance: {{ .Release.Name | quote }}
-app.kubernetes.io/component: siprec-recorder
-{{ include "siprec-stack.chartLabel" . }}
+app.kubernetes.io/component: recorder
+{{ include "streamlink.chartLabel" . }}
 {{- end }}
 
-{{/* Selector labels for SIPREC recorder pods. */}}
-{{- define "siprec.selectorLabels" -}}
-app.kubernetes.io/name: siprec-recorder
+{{/* Selector labels for recorder pods. */}}
+{{- define "recorder.selectorLabels" -}}
+app.kubernetes.io/name: cx-streamlink-rec
 app.kubernetes.io/instance: {{ .Release.Name | quote }}
 {{- end }}
 
-{{/* Base name of SIPREC recorder resources. */}}
-{{- define "siprec.fullname" -}}
-{{- printf "%s-siprec-recorder" .Release.Name | trunc 63 | trimSuffix "-" }}
+{{/* Fixed base name of recorder resources. */}}
+{{- define "recorder.fullname" -}}
+{{- print "cx-streamlink-rec" }}
 {{- end }}
 
 {{/* Stable, DNS-safe suffix for a configured recorder instance. */}}
-{{- define "siprec.instanceName" -}}
-{{- required "siprecRecorder.instances[].name is required" .name | lower | replace "_" "-" | trunc 30 | trimSuffix "-" }}
+{{- define "recorder.instanceName" -}}
+{{- required "recorder.instances[].name is required" .name | lower | replace "_" "-" | trunc 30 | trimSuffix "-" }}
 {{- end }}
 
-{{/* Full name for an instance-scoped SIPREC recorder resource. */}}
-{{- define "siprec.instanceFullname" -}}
+{{/* Full name for an instance-scoped recorder resource. */}}
+{{- define "recorder.instanceFullname" -}}
 {{- $root := .root -}}
-{{- $instanceName := include "siprec.instanceName" .instance -}}
-{{- $baseName := include "siprec.fullname" $root | trunc 32 | trimSuffix "-" -}}
+{{- $instanceName := include "recorder.instanceName" .instance -}}
+{{- $baseName := include "recorder.fullname" $root -}}
 {{- printf "%s-%s" $baseName $instanceName | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/* Selector labels for one recorder Deployment. */}}
-{{- define "siprec.instanceSelectorLabels" -}}
-{{ include "siprec.selectorLabels" .root }}
-siprec-stack/recorder-instance: {{ include "siprec.instanceName" .instance | quote }}
+{{- define "recorder.instanceSelectorLabels" -}}
+{{ include "recorder.selectorLabels" .root }}
+cx-streamlink/recorder-instance: {{ include "recorder.instanceName" .instance | quote }}
 {{- end }}
 
 {{/* Name of the PVC used by one recorder Deployment. */}}
-{{- define "siprec.instancePVCName" -}}
-{{- printf "%s-recordings" (include "siprec.instanceFullname" .) | trunc 63 | trimSuffix "-" }}
+{{- define "recorder.instancePVCName" -}}
+{{- printf "%s-recordings" (include "recorder.instanceFullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/* Name of the Kubernetes ServiceAccount used by recorder pods. */}}
-{{- define "siprec.serviceAccountName" -}}
-{{- printf "%s-siprec-recorder" .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- define "recorder.serviceAccountName" -}}
+{{- print "cx-streamlink-rec" }}
 {{- end }}
 
-{{/* Kamailio resource name. */}}
-{{- define "kamailio.fullname" -}}
-{{- printf "%s-kamailio" .Release.Name | trunc 63 | trimSuffix "-" }}
+{{/* Fixed proxy resource name. */}}
+{{- define "proxy.fullname" -}}
+{{- print "cx-streamlink-proxy" }}
 {{- end }}
 
-{{/* Labels applied to Kamailio resources. */}}
-{{- define "kamailio.labels" -}}
-app.kubernetes.io/name: kamailio
+{{/* Labels applied to proxy resources. */}}
+{{- define "proxy.labels" -}}
+app.kubernetes.io/name: cx-streamlink-proxy
 app.kubernetes.io/instance: {{ .Release.Name | quote }}
-app.kubernetes.io/component: sip-proxy
-{{ include "siprec-stack.chartLabel" . }}
+app.kubernetes.io/component: proxy
+{{ include "streamlink.chartLabel" . }}
 {{- end }}
 
-{{/* Immutable Kamailio selector labels. */}}
-{{- define "kamailio.selectorLabels" -}}
-app.kubernetes.io/name: kamailio
+{{/* Immutable proxy selector labels. */}}
+{{- define "proxy.selectorLabels" -}}
+app.kubernetes.io/name: cx-streamlink-proxy
 app.kubernetes.io/instance: {{ .Release.Name | quote }}
 {{- end }}

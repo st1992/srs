@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "proxy.fullname" . }}
+  namespace: {{ include "streamlink.namespace" . }}
+  labels:
+    {{- include "proxy.labels" . | nindent 4 }}
+  annotations:
+    cx-streamlink/purpose: "proxy-loadbalancer"
+    {{- with .Values.proxy.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: {{ .Values.proxy.service.type }}
+  {{- if eq .Values.proxy.service.type "LoadBalancer" }}
+  loadBalancerIP: {{ required "proxy.service.loadBalancerIP is required" .Values.proxy.service.loadBalancerIP | quote }}
+  {{- with .Values.proxy.service.loadBalancerClass }}
+  loadBalancerClass: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.proxy.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  externalTrafficPolicy: Local
+  {{- end }}
+  selector:
+    {{- include "proxy.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: sip-udp
+      port: {{ .Values.proxy.service.port }}
+      targetPort: sip-udp
+      protocol: UDP

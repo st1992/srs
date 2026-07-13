@@ -1,0 +1,52 @@
+{{- $root := . }}
+{{- $instanceNames := dict }}
+{{- range $index, $instance := $root.Values.recorder.instances }}
+{{- $instanceName := include "recorder.instanceName" $instance }}
+{{- if hasKey $instanceNames $instanceName }}
+{{- fail (printf "recorder.instances[%d].name normalizes to duplicate name %q" $index $instanceName) }}
+{{- end }}
+{{- $_ := set $instanceNames $instanceName true }}
+{{- end }}
+{{ range $index, $instance := $root.Values.recorder.instances }}
+{{ $instanceCtx := dict "root" $root "instance" $instance }}
+{{ if $index }}
+---
+{{ end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "recorder.instanceFullname" $instanceCtx }}
+  namespace: {{ include "streamlink.namespace" $root }}
+  labels:
+    {{- include "recorder.labels" $root | nindent 4 }}
+    cx-streamlink/recorder-instance: {{ include "recorder.instanceName" $instance | quote }}
+  annotations:
+    cx-streamlink/purpose: "recorder-loadbalancer"
+    cx-streamlink/recorder-instance: {{ include "recorder.instanceName" $instance | quote }}
+{{ with $root.Values.recorder.service.annotations }}
+{{ toYaml . | nindent 4 }}
+{{ end }}
+spec:
+  type: {{ $root.Values.recorder.service.type }}
+{{ if eq $root.Values.recorder.service.type "LoadBalancer" }}
+  loadBalancerIP: {{ required (printf "recorder.instances[%d].loadBalancerIP is required" $index) $instance.loadBalancerIP | quote }}
+{{ with $root.Values.recorder.service.loadBalancerClass }}
+  loadBalancerClass: {{ . | quote }}
+{{ end }}
+{{ with $root.Values.recorder.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+{{ toYaml . | nindent 4 }}
+{{ end }}
+  # Preserve the client address and make only nodes with this instance's Ready
+  # pod eligible as backends. Different instance VIPs can select pods on the
+  # same node.
+  externalTrafficPolicy: Local
+{{ end }}
+  selector:
+    {{- include "recorder.instanceSelectorLabels" $instanceCtx | nindent 4 }}
+  ports:
+    - name: sip-udp
+      port: {{ $root.Values.recorder.service.port }}
+      targetPort: sip-udp
+      protocol: UDP
+{{ end }}

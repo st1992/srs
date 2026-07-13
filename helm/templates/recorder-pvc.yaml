@@ -1,7 +1,7 @@
 {{- $root := . }}
-{{- range $index, $instance := $root.Values.siprecRecorder.instances }}
+{{- range $index, $instance := $root.Values.recorder.instances }}
 {{- $instanceCtx := dict "root" $root "instance" $instance }}
-{{- $persistence := deepCopy $root.Values.siprecRecorder.persistence }}
+{{- $persistence := deepCopy $root.Values.recorder.persistence }}
 {{- with $instance.persistence }}
 {{- $persistence = mergeOverwrite $persistence . }}
 {{- end }}
@@ -12,11 +12,11 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "siprec.instancePVCName" $instanceCtx }}
-  namespace: {{ include "siprec-stack.namespace" $root }}
+  name: {{ include "recorder.instancePVCName" $instanceCtx }}
+  namespace: {{ include "streamlink.namespace" $root }}
   labels:
-    {{- include "siprec.labels" $root | nindent 4 }}
-    siprec-stack/recorder-instance: {{ include "siprec.instanceName" $instance | quote }}
+    {{- include "recorder.labels" $root | nindent 4 }}
+    cx-streamlink/recorder-instance: {{ include "recorder.instanceName" $instance | quote }}
 spec:
   accessModes:
     {{- toYaml $persistence.accessModes | nindent 4 }}

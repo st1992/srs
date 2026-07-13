@@ -1,12 +1,12 @@
-# siprec-stack Helm chart defaults
-# Override with: helm install siprec-stack ./helm -f my-values.yaml
+# cx-streamlink Helm chart defaults
+# Override with: helm install streamlink ./helm -f my-values.yaml
 
 namespaceOverride: ""
 
 # Each entry renders an independent one-replica Deployment, ConfigMap, PVC,
 # and internal passthrough LoadBalancer Service. Add entries to scale the
 # recorder pool; do not scale an individual recorder Deployment.
-siprecRecorder:
+recorder:
   image:
     repository: us-central1-docker.pkg.dev/div-deai-cx-dev-usc1-ri/cx-sip/cx-streamlink-rec
     tag: "dev"
@@ -69,9 +69,9 @@ siprecRecorder:
     rtpPortStart: 10000
     rtpPortEnd: 30000
     recordingDir: "/app/recordings"
-    gcsBucket: "cx-siprec-audio-raw"
+    gcsBucket: "cx-streamlink-audio-raw"
     gcsObjectPrefix: "rec"
-    gcsMetadataBucket: "cx-siprec-metadata"
+    gcsMetadataBucket: "cx-streamlink-metadata"
     gcsMetadataObjectPrefix: "metadata"
     deleteAfterUpload: true
     uploadWorkers: 4
@@ -79,9 +79,9 @@ siprecRecorder:
     uploadSweepIntervalSec: 60
     shutdownUploadTimeoutSec: 30
 
-# Stateless SIPREC signaling proxy. Its dispatcher destinations are generated
-# from siprecRecorder.instances and use the recorder Service cluster DNS names.
-kamailio:
+# Stateless signaling proxy. Its dispatcher destinations are generated from
+# recorder.instances and use the recorder Service cluster DNS names.
+proxy:
   image:
     repository: us-central1-docker.pkg.dev/div-deai-cx-dev-usc1-ri/cx-sip/cx-streamlink-proxy
     tag: "dev"
