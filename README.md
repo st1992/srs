@@ -186,3 +186,32 @@ See `config.example.yaml` for the full set of options. API-relevant fields:
 | `api_auth_token` | *(empty)* | Bearer token required on every request; unset disables auth |
 | `api_advertise_ip` | *(auto-detected)* | IP stored in the Redis call locator so an external router can find the pod owning a `call_id` |
 | `agent_assist_project_id` / `agent_assist_conversation_profile_id` | *(empty)* | Required to enable `/v1/agent-assist/*`; if unset, start requests fail with a disabled-client error |
+
+## Docker
+
+Build the image:
+
+```sh
+docker build -t siprec-recorder:latest .
+```
+
+Run it on the host network, pointing at a mounted GCP service account key via
+`GOOGLE_APPLICATION_CREDENTIALS` (Application Default Credentials — used for both
+GCS uploads and Agent Assist/Dialogflow when `gcp_credentials_file` is left empty
+in config):
+
+```sh
+docker run -d \
+  --name siprec-recorder \
+  --network host \
+  -v /path/to/service-account.json:/secrets/gcp-credentials.json:ro \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-credentials.json \
+  -v "$(pwd)/config.yaml:/app/config.yaml:ro" \
+  -v siprec-recordings:/app/recordings \
+  siprec-recorder:latest
+```
+
+- `--network host` shares the host's network stack directly (no `-p` mappings needed or honored) — SIP (`5060/udp`), the RTP range (`10000-11000/udp`, must match `rtp_port_start`/`rtp_port_end` in `config.yaml`), and the control API (`8080/tcp`) all bind straight to the host. This matches the `hostNetwork: true` deployment mode the recorder's SIP Contact/media-IP auto-detection assumes in Kubernetes (see `server.go`'s `detectMediaIP`).
+- `--network host` is Linux-only; it isn't supported the same way on Docker Desktop for Mac/Windows — use `-p` port mappings there instead.
+- Mount your own `config.yaml` over the image's default (`config.example.yaml`) to set `gcs_bucket`, `agent_assist_project_id`, etc.
+- The `siprec-recordings` named volume persists `/app/recordings` (local `.ulaw`/metadata files awaiting or bypassing GCS upload) across container restarts.
