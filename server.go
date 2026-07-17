@@ -449,6 +449,10 @@ func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, me
 		sess.mu.Unlock()
 		return result, nil
 	}
+	if sess.Paused {
+		sess.mu.Unlock()
+		return nil, fmt.Errorf("%w: cannot start agent assist while paused", errCallPaused)
+	}
 	if sess.Mode != sessionModeRecording {
 		state := sess.Mode
 		sess.mu.Unlock()
@@ -475,6 +479,11 @@ func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, me
 	now := time.Now().UTC()
 
 	sess.mu.Lock()
+	if sess.Paused {
+		sess.mu.Unlock()
+		_ = run.complete(context.Background())
+		return nil, fmt.Errorf("%w: cannot start agent assist while paused", errCallPaused)
+	}
 	if sess.Mode != sessionModeRecording {
 		state := sess.Mode
 		sess.mu.Unlock()
@@ -550,6 +559,10 @@ func (s *recorderServer) stopAgentAssist(ctx context.Context, callID, reason, er
 		sess.mu.Unlock()
 		return result, nil
 	}
+	if sess.Paused {
+		sess.mu.Unlock()
+		return nil, fmt.Errorf("%w: cannot stop agent assist while paused", errCallPaused)
+	}
 	if sess.Mode != sessionModeAgentAssist || sess.AgentAssist == nil {
 		state := sess.Mode
 		sess.mu.Unlock()
@@ -603,6 +616,75 @@ func (s *recorderServer) stopAgentAssist(ctx context.Context, callID, reason, er
 	return &agentAssistResult{CallID: callID, ConversationID: run.ConversationID, State: sessionModeRecording}, nil
 }
 
+type pauseResult struct {
+	CallID string
+	State  sessionMode
+	Paused bool
+}
+
+// PauseCall stops feeding RTP to whichever sink (recording file or Agent
+// Assist stream) is currently active for the call, without closing the
+// current segment, rotating files/conversations, or touching GCS. Resume
+// restores the exact sink that was active at pause time.
+func (s *recorderServer) PauseCall(ctx context.Context, callID string) (*pauseResult, error) {
+	sess, ok := s.sessions.Get(callID)
+	if !ok {
+		return nil, errCallNotFound
+	}
+
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.Mode == sessionModeClosed {
+		return nil, fmt.Errorf("%w: call is closed", errInvalidTransition)
+	}
+	if sess.Paused {
+		return &pauseResult{CallID: callID, State: sess.Mode, Paused: true}, nil
+	}
+	paused := make(map[string]rtpSink, len(sess.Legs))
+	for _, leg := range sess.Legs {
+		paused[leg.label] = leg.ReplaceSink(discardSink{})
+	}
+	sess.PausedSinks = paused
+	sess.Paused = true
+	return &pauseResult{CallID: callID, State: sess.Mode, Paused: true}, nil
+}
+
+// ResumeCall restores the sink each leg had installed at the moment of the
+// preceding Pause call.
+func (s *recorderServer) ResumeCall(ctx context.Context, callID string) (*pauseResult, error) {
+	sess, ok := s.sessions.Get(callID)
+	if !ok {
+		return nil, errCallNotFound
+	}
+
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.Mode == sessionModeClosed {
+		return nil, fmt.Errorf("%w: call is closed", errInvalidTransition)
+	}
+	if !sess.Paused {
+		return &pauseResult{CallID: callID, State: sess.Mode, Paused: false}, nil
+	}
+	restorePausedSinksLocked(sess)
+	return &pauseResult{CallID: callID, State: sess.Mode, Paused: false}, nil
+}
+
+// restorePausedSinksLocked swaps each leg back to its real (pre-pause) sink
+// and clears the paused state. Callers must hold sess.mu. Safe to call on a
+// session that isn't paused (no-op).
+func restorePausedSinksLocked(sess *recSession) {
+	if !sess.Paused {
+		return
+	}
+	for _, leg := range sess.Legs {
+		if real, ok := sess.PausedSinks[leg.label]; ok {
+			leg.ReplaceSink(real)
+		}
+	}
+	sess.PausedSinks = nil
+	sess.Paused = false
+}
+
 func (s *recorderServer) fallbackFromAgentAssist(callID string, cause error) {
 	if cause == nil {
 		return
@@ -621,6 +703,11 @@ func (s *recorderServer) finalizeSession(sess *recSession, endTimeISO string, by
 	}
 
 	sess.mu.Lock()
+	// If the call ended while paused, restore the real sink (file or Agent
+	// Assist stream) before Close() runs below, otherwise Close() would only
+	// close the no-op discard sink and leave the real one (and its file
+	// handle / Dialogflow stream goroutines) never closed.
+	restorePausedSinksLocked(sess)
 	completed := sess.completeCurrentSegmentLocked(endTime, reason)
 	if completed != nil && sess.AgentAssist != nil {
 		completed.ConversationID = sess.AgentAssist.ConversationID

@@ -82,6 +82,14 @@ type recSession struct {
 	CompletedSegments []*callSegment
 	AgentAssist       *agentAssistRun
 
+	// Paused indicates the currently active flow (recording or agent assist)
+	// has been paused via the API: legs are swapped to a discardSink and the
+	// real sink for each leg is stashed in PausedSinks until Resume restores
+	// it. Pausing does not close a segment, rotate files/conversations, or
+	// trigger any GCS upload.
+	Paused      bool
+	PausedSinks map[string]rtpSink
+
 	mu     sync.Mutex
 	closed bool
 }

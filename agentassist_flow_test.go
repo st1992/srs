@@ -173,6 +173,122 @@ func TestAgentAssistStartIsIdempotentWhileActive(t *testing.T) {
 	assert.Equal(t, 1, assist.starts)
 }
 
+func TestPauseDuringRecordingBlocksWriteAndResumeRestores(t *testing.T) {
+	srv, sess, _, _, _ := newTestRecorderServer(t)
+	for _, leg := range sess.Legs {
+		require.Equal(t, "recording", leg.SinkKind())
+	}
+
+	result, err := srv.PauseCall(context.Background(), "call-1")
+	require.NoError(t, err)
+	assert.True(t, result.Paused)
+	assert.Equal(t, sessionModeRecording, result.State)
+	for _, leg := range sess.Legs {
+		assert.Equal(t, "discard", leg.SinkKind())
+	}
+
+	// Pausing an already-paused call is a no-op, not an error.
+	again, err := srv.PauseCall(context.Background(), "call-1")
+	require.NoError(t, err)
+	assert.True(t, again.Paused)
+
+	resumed, err := srv.ResumeCall(context.Background(), "call-1")
+	require.NoError(t, err)
+	assert.False(t, resumed.Paused)
+	for _, leg := range sess.Legs {
+		assert.Equal(t, "recording", leg.SinkKind())
+	}
+
+	// Resuming an already-resumed call is a no-op, not an error.
+	again2, err := srv.ResumeCall(context.Background(), "call-1")
+	require.NoError(t, err)
+	assert.False(t, again2.Paused)
+}
+
+func TestPauseDuringAgentAssistSwapsToDiscardAndBack(t *testing.T) {
+	srv, sess, _, _, _ := newTestRecorderServer(t)
+	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	require.NoError(t, err)
+	for _, leg := range sess.Legs {
+		require.Equal(t, "agent_assist", leg.SinkKind())
+	}
+
+	_, err = srv.PauseCall(context.Background(), "call-1")
+	require.NoError(t, err)
+	for _, leg := range sess.Legs {
+		assert.Equal(t, "discard", leg.SinkKind())
+	}
+
+	_, err = srv.ResumeCall(context.Background(), "call-1")
+	require.NoError(t, err)
+	for _, leg := range sess.Legs {
+		assert.Equal(t, "agent_assist", leg.SinkKind())
+	}
+}
+
+func TestModeSwitchBlockedWhilePaused(t *testing.T) {
+	srv, _, _, _, assist := newTestRecorderServer(t)
+
+	_, err := srv.PauseCall(context.Background(), "call-1")
+	require.NoError(t, err)
+
+	_, err = srv.StartAgentAssist(context.Background(), "call-1", nil)
+	assert.ErrorIs(t, err, errCallPaused)
+	assert.Equal(t, 0, assist.starts)
+
+	_, err = srv.ResumeCall(context.Background(), "call-1")
+	require.NoError(t, err)
+
+	_, err = srv.StartAgentAssist(context.Background(), "call-1", nil)
+	require.NoError(t, err)
+
+	_, err = srv.PauseCall(context.Background(), "call-1")
+	require.NoError(t, err)
+
+	_, err = srv.StopAgentAssist(context.Background(), "call-1")
+	assert.ErrorIs(t, err, errCallPaused)
+}
+
+func TestPauseResumeErrors(t *testing.T) {
+	srv, sess, _, _, _ := newTestRecorderServer(t)
+
+	_, err := srv.PauseCall(context.Background(), "missing")
+	assert.ErrorIs(t, err, errCallNotFound)
+	_, err = srv.ResumeCall(context.Background(), "missing")
+	assert.ErrorIs(t, err, errCallNotFound)
+
+	sess.mu.Lock()
+	sess.Mode = sessionModeClosed
+	sess.mu.Unlock()
+
+	_, err = srv.PauseCall(context.Background(), "call-1")
+	assert.ErrorIs(t, err, errInvalidTransition)
+	_, err = srv.ResumeCall(context.Background(), "call-1")
+	assert.ErrorIs(t, err, errInvalidTransition)
+}
+
+// TestFinalizeSessionWhilePausedClosesRealSink guards against a regression
+// where ending a call while paused would close only the no-op discard sink
+// (installed by Pause) and leave the real sink - and, for a file sink, its
+// underlying os.File - never closed/flushed.
+func TestFinalizeSessionWhilePausedClosesRealSink(t *testing.T) {
+	srv, sess, _, meta, _ := newTestRecorderServer(t)
+	real := &memorySink{kind: "recording"}
+	for _, leg := range sess.Legs {
+		leg.ReplaceSink(real)
+	}
+
+	_, err := srv.PauseCall(context.Background(), "call-1")
+	require.NoError(t, err)
+	require.True(t, sess.Paused)
+
+	srv.finalizeSession(sess, time.Now().UTC().Format(time.RFC3339Nano), nil, "bye")
+
+	assert.False(t, sess.Paused)
+	assert.True(t, real.closed)
+	assert.Len(t, meta.enqueued, 1)
+}
+
 func TestAgentAssistFallbackOnSinkError(t *testing.T) {
 	srv, sess, _, meta, _ := newTestRecorderServer(t)
 	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)

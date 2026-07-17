@@ -15,6 +15,7 @@ import (
 var (
 	errCallNotFound      = errors.New("call not found")
 	errInvalidTransition = errors.New("invalid call state transition")
+	errCallPaused        = errors.New("call is paused")
 )
 
 type apiServer struct {
@@ -34,6 +35,8 @@ func NewAPIServer(cfg *Config, recorder *recorderServer, log *slog.Logger) *apiS
 	mux.HandleFunc("/healthz", api.handleHealth)
 	mux.HandleFunc("/v1/agent-assist/start", api.handleStartAgentAssist)
 	mux.HandleFunc("/v1/agent-assist/stop", api.handleStopAgentAssist)
+	mux.HandleFunc("/v1/pause", api.handlePause)
+	mux.HandleFunc("/v1/resume", api.handleResume)
 	api.server = &http.Server{
 		Addr:              cfg.HTTPListenAddr,
 		Handler:           mux,
@@ -148,6 +151,76 @@ func (a *apiServer) handleStopAgentAssist(w http.ResponseWriter, r *http.Request
 	})
 }
 
+type callIDRequest struct {
+	CallID string `json:"call_id"`
+}
+
+type pauseResumeResponse struct {
+	CallID string `json:"call_id"`
+	State  string `json:"state,omitempty"`
+	Paused bool   `json:"paused"`
+}
+
+func (a *apiServer) handlePause(w http.ResponseWriter, r *http.Request) {
+	if !a.authorized(r) {
+		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req callIDRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.CallID) == "" {
+		writeAPIError(w, http.StatusBadRequest, "call_id is required")
+		return
+	}
+	result, err := a.recorder.PauseCall(r.Context(), req.CallID)
+	if err != nil {
+		a.writeCallError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, pauseResumeResponse{
+		CallID: result.CallID,
+		State:  string(result.State),
+		Paused: result.Paused,
+	})
+}
+
+func (a *apiServer) handleResume(w http.ResponseWriter, r *http.Request) {
+	if !a.authorized(r) {
+		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req callIDRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.CallID) == "" {
+		writeAPIError(w, http.StatusBadRequest, "call_id is required")
+		return
+	}
+	result, err := a.recorder.ResumeCall(r.Context(), req.CallID)
+	if err != nil {
+		a.writeCallError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, pauseResumeResponse{
+		CallID: result.CallID,
+		State:  string(result.State),
+		Paused: result.Paused,
+	})
+}
+
 func (a *apiServer) authorized(r *http.Request) bool {
 	if a.cfg.APIAuthToken == "" {
 		return true
@@ -161,6 +234,8 @@ func (a *apiServer) writeCallError(w http.ResponseWriter, err error) {
 	case errors.Is(err, errCallNotFound):
 		writeAPIError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, errInvalidTransition):
+		writeAPIError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, errCallPaused):
 		writeAPIError(w, http.StatusConflict, err.Error())
 	default:
 		writeAPIError(w, http.StatusInternalServerError, err.Error())

@@ -32,6 +32,35 @@ func TestAgentAssistAPIStartStop(t *testing.T) {
 	assert.Contains(t, stopRec.Body.String(), `"state":"recording"`)
 }
 
+func TestPauseResumeAPI(t *testing.T) {
+	srv, _, _, _, _ := newTestRecorderServer(t)
+	cfg := *srv.cfg
+	api := NewAPIServer(&cfg, srv, testLogger())
+
+	pauseReq := httptest.NewRequest(http.MethodPost, "/v1/pause", strings.NewReader(`{"call_id":"call-1"}`))
+	pauseRec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(pauseRec, pauseReq)
+	require.Equal(t, http.StatusOK, pauseRec.Code)
+	assert.Contains(t, pauseRec.Body.String(), `"call_id":"call-1"`)
+	assert.Contains(t, pauseRec.Body.String(), `"paused":true`)
+
+	blockedReq := httptest.NewRequest(http.MethodPost, "/v1/agent-assist/start", strings.NewReader(`{"call_id":"call-1","metadata":{}}`))
+	blockedRec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(blockedRec, blockedReq)
+	require.Equal(t, http.StatusConflict, blockedRec.Code)
+
+	resumeReq := httptest.NewRequest(http.MethodPost, "/v1/resume", strings.NewReader(`{"call_id":"call-1"}`))
+	resumeRec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(resumeRec, resumeReq)
+	require.Equal(t, http.StatusOK, resumeRec.Code)
+	assert.Contains(t, resumeRec.Body.String(), `"paused":false`)
+
+	missingReq := httptest.NewRequest(http.MethodPost, "/v1/pause", strings.NewReader(`{"call_id":"missing"}`))
+	missingRec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(missingRec, missingReq)
+	require.Equal(t, http.StatusNotFound, missingRec.Code)
+}
+
 func TestAgentAssistAPIAuthAndNotFound(t *testing.T) {
 	srv, _, _, _, _ := newTestRecorderServer(t)
 	cfg := *srv.cfg
