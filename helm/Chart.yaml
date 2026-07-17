@@ -1,15 +1,16 @@
 apiVersion: v2
-name: siprec-stack
+name: cx-streamlink
 description: >
-  streamlink SIPREC media-recorder DaemonSet (one pod per recorder node,
-  host-network, fronted directly by a GKE Internal Passthrough NLB).
+  Streamlink signaling proxy and co-located host-network recorder Deployments
+  with per-recorder GKE Internal Passthrough NLBs.
 type: application
-version: 0.2.0
+version: 0.5.2
 appVersion: "1.0.0"
 keywords:
-  - siprec
   - sip
+  - streamlink
   - recording
   - rtp
+  - proxy
 maintainers:
   - name: platform-team

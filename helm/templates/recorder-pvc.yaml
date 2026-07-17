@@ -1,0 +1,30 @@
+{{- $root := . }}
+{{- range $index, $instance := $root.Values.recorder.instances }}
+{{- $instanceCtx := dict "root" $root "instance" $instance }}
+{{- $persistence := deepCopy $root.Values.recorder.persistence }}
+{{- with $instance.persistence }}
+{{- $persistence = mergeOverwrite $persistence . }}
+{{- end }}
+{{- if $persistence.enabled }}
+{{- if $index }}
+---
+{{- end }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "recorder.instancePVCName" $instanceCtx }}
+  namespace: {{ include "streamlink.namespace" $root }}
+  labels:
+    {{- include "recorder.labels" $root | nindent 4 }}
+    cx-streamlink/recorder-instance: {{ include "recorder.instanceName" $instance | quote }}
+spec:
+  accessModes:
+    {{- toYaml $persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ $persistence.size }}
+  {{- with $persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

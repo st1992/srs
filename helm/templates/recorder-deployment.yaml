@@ -1,0 +1,136 @@
+{{- $root := . }}
+{{- range $index, $instance := $root.Values.recorder.instances }}
+{{- $instanceCtx := dict "root" $root "instance" $instance }}
+{{- $sipPort := int (required (printf "recorder.instances[%d].sipPort is required" $index) $instance.sipPort) }}
+{{- $persistence := deepCopy $root.Values.recorder.persistence }}
+{{- with $instance.persistence }}
+{{- $persistence = mergeOverwrite $persistence . }}
+{{- end }}
+{{- if $index }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "recorder.instanceFullname" $instanceCtx }}
+  namespace: {{ include "streamlink.namespace" $root }}
+  labels:
+    {{- include "recorder.labels" $root | nindent 4 }}
+    cx-streamlink/recorder-instance: {{ include "recorder.instanceName" $instance | quote }}
+  annotations:
+    cx-streamlink/role: "recorder"
+    cx-streamlink/scaling: "one-deployment-per-recorder"
+spec:
+  # A recorder owns one VIP, one session store, and one RWO volume. Scale the
+  # pool by adding instances, never by increasing this replica count.
+  replicas: 1
+  strategy:
+    type: {{ $root.Values.recorder.strategy.type }}
+  selector:
+    matchLabels:
+      {{- include "recorder.instanceSelectorLabels" $instanceCtx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "recorder.labels" $root | nindent 8 }}
+        cx-streamlink/recorder-instance: {{ include "recorder.instanceName" $instance | quote }}
+      annotations:
+        checksum/recorder-config: {{ printf "%s:%s:%d:%s" (toJson $root.Values.recorder.config) (required (printf "recorder.instances[%d].loadBalancerIP is required" $index) $instance.loadBalancerIP) $sipPort (toJson $root.Values.recorder.gcp.credentialsSecret) | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "recorder.serviceAccountName" $root }}
+      hostNetwork: {{ $root.Values.recorder.hostNetwork }}
+      {{- if $root.Values.recorder.hostNetwork }}
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      terminationGracePeriodSeconds: 60
+      {{- if $root.Values.recorder.coLocateOnSameNode }}
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "recorder.selectorLabels" $root | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+      {{- end }}
+      {{- with $root.Values.recorder.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.recorder.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: false
+      initContainers:
+        - name: fix-recordings-permissions
+          image: busybox:1.36
+          command: ["/bin/sh", "-c", "chmod 0777 /mnt/recordings"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: recordings
+              mountPath: /mnt/recordings
+      containers:
+        - name: cx-streamlink-rec
+          image: "{{ $root.Values.recorder.image.repository }}:{{ $root.Values.recorder.image.tag }}"
+          imagePullPolicy: {{ $root.Values.recorder.image.pullPolicy }}
+          securityContext:
+            capabilities:
+              add:
+                - NET_RAW
+                - NET_ADMIN
+          resources:
+            {{- toYaml $root.Values.recorder.resources | nindent 12 }}
+          ports:
+            - name: sip-udp
+              containerPort: {{ $sipPort }}
+              protocol: UDP
+            - name: http-api
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http-api
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http-api
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: recorder-config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: recordings
+              mountPath: /app/recordings
+            {{- if $root.Values.recorder.gcp.credentialsSecret.name }}
+            - name: gcp-credentials
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: recorder-config
+          configMap:
+            name: {{ include "recorder.instanceFullname" $instanceCtx }}-config
+        - name: recordings
+          {{- if $persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "recorder.instancePVCName" $instanceCtx }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if $root.Values.recorder.gcp.credentialsSecret.name }}
+        - name: gcp-credentials
+          secret:
+            secretName: {{ $root.Values.recorder.gcp.credentialsSecret.name }}
+        {{- end }}
+{{- end }}

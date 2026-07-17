@@ -1,0 +1,168 @@
+{{- $root := . }}
+{{- $proxyVIP := required "proxy.service.loadBalancerIP is required because the proxy advertises it in SIP headers" $root.Values.proxy.service.loadBalancerIP }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "proxy.fullname" $root }}-config
+  namespace: {{ include "streamlink.namespace" $root }}
+  labels:
+    {{- include "proxy.labels" $root | nindent 4 }}
+data:
+  dispatcher.list: |
+    # setid destination_uri flags priority attrs
+{{ range $instance := $root.Values.recorder.instances }}
+{{- $instanceCtx := dict "root" $root "instance" $instance }}
+    1 sip:{{ include "recorder.instanceFullname" $instanceCtx }}.{{ include "streamlink.namespace" $root }}.svc.cluster.local:{{ $root.Values.recorder.service.port }} 0 0
+{{ end }}
+  proxy.cfg: |
+    #!KAMAILIO
+
+    ####### Global Parameters #########
+
+    debug={{ $root.Values.proxy.config.debug }}
+    log_stderror=yes
+    log_facility=LOG_LOCAL0
+    log_prefix="{$ci} "
+
+    fork=yes
+    children={{ $root.Values.proxy.config.children }}
+
+    disable_tcp=yes
+    auto_aliases=no
+
+    # Always return responses to the source IP and source UDP port from which
+    # the request arrived. Recording sources may be behind NAT or an NLB and
+    # can use an ephemeral source port that differs from the port in their Via.
+    reply_to_via=0
+
+    # The GKE internal passthrough NLB preserves the destination VIP. Advertise
+    # that stable address in Via and Record-Route while binding every pod IP.
+    listen=udp:0.0.0.0:{{ $root.Values.proxy.service.port }} advertise {{ $proxyVIP }}:{{ $root.Values.proxy.service.port }}
+    alias="{{ $proxyVIP }}"
+
+    server_signature=no
+    server_header="Server: EXL Streamlink"
+    user_agent_header="User-Agent: EXL Streamlink"
+
+    ####### Modules #########
+
+    loadmodule "tm.so"
+    loadmodule "sl.so"
+    loadmodule "rr.so"
+    loadmodule "pv.so"
+    loadmodule "maxfwd.so"
+    loadmodule "textops.so"
+    loadmodule "textopsx.so"
+    loadmodule "siputils.so"
+    loadmodule "sanity.so"
+    loadmodule "dispatcher.so"
+    loadmodule "xlog.so"
+
+    ####### Module parameters #########
+
+    modparam("tm", "fr_timer", 5000)
+    modparam("tm", "fr_inv_timer", 30000)
+
+    modparam("rr", "enable_full_lr", 1)
+    modparam("rr", "append_fromtag", 0)
+
+    modparam("dispatcher", "list_file", "/etc/kamailio/dispatcher.list")
+    modparam("dispatcher", "ds_ping_method", "OPTIONS")
+    modparam("dispatcher", "ds_ping_from", "sip:healthcheck@exlstreamlink")
+    modparam("dispatcher", "ds_ping_interval", {{ $root.Values.proxy.config.dispatcherPingInterval }})
+    modparam("dispatcher", "ds_probing_mode", 1)
+    modparam("dispatcher", "ds_probing_threshold", 3)
+
+    ####### Routing Logic #########
+
+    request_route {
+        route(REQINIT);
+
+        if (has_totag()) {
+            route(WITHINDLG);
+            exit;
+        }
+
+        if (is_method("CANCEL")) {
+            if (t_check_trans()) {
+                t_relay();
+            }
+            exit;
+        }
+
+        t_check_trans();
+
+        # Dispatcher algorithm 4 selects new dialogs round-robin.
+        if (!ds_select_dst("1", "4")) {
+            xlog("L_ERR", "no SRS destination available for $rm $ru, Call-ID $ci\n");
+            sl_send_reply("503", "No recording server available");
+            exit;
+        }
+
+        # Persist the selected recorder Service URI in the route set so any
+        # proxy replica can route subsequent requests in the same dialog.
+        add_rr_param(";srs=$du");
+        record_route();
+
+        xlog("L_INFO", "NEW recording dialog Call-ID=$ci -> $du\n");
+        route(RELAY);
+        exit;
+    }
+
+    route[REQINIT] {
+        # Populate received/rport from the packet source so provisional and
+        # final replies return to the same UDP endpoint that sent the request.
+        force_rport();
+
+        if (!sanity_check("1511", "7")) {
+            xlog("L_WARN", "malformed SIP message from $si:$sp\n");
+            exit;
+        }
+        if (!mf_process_maxfwd_header(10)) {
+            sl_send_reply("483", "Too Many Hops");
+            exit;
+        }
+        if (is_method("OPTIONS") && uri == myself && $rU == $null) {
+            sl_send_reply("200", "OK");
+            exit;
+        }
+    }
+
+    route[WITHINDLG] {
+        $var(srs) = $null;
+        if ($hdr(Route) != $null) {
+            # Route is a SIP name-address. Extract its URI before reading the
+            # custom parameter that carries the selected recorder Service.
+            $var(route_uri) = $(hdr(Route){nameaddr.uri});
+            $var(srs) = $(var(route_uri){uri.param,srs});
+        }
+
+        if (!loose_route()) {
+            if (is_method("ACK")) {
+                # A non-2xx final response does not create a route set, but its
+                # ACK still belongs to the existing INVITE transaction.
+                if (t_check_trans()) {
+                    t_relay();
+                }
+                exit;
+            }
+            sl_send_reply("404", "Not Found (no matching dialog)");
+            exit;
+        }
+
+        if ($var(srs) != $null) {
+            $du = $var(srs);
+        } else {
+            xlog("L_WARN", "in-dialog $rm, Call-ID $ci: no srs Route parameter\n");
+        }
+
+        route(RELAY);
+        exit;
+    }
+
+    route[RELAY] {
+        if (!t_relay()) {
+            sl_reply_error();
+        }
+        exit;
+    }

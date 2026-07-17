@@ -31,11 +31,13 @@ FROM debian:bookworm-slim
 # tzdata          : correct timestamps in structured logs when TZ is overridden.
 # sngrep          : interactive SIP message viewer for debugging on the pod
 #                   (e.g. `kubectl exec -it <pod> -- sngrep -d any port 5060`).
+# curl            : HEALTHCHECK probe against the HTTP control API's /healthz.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
         tzdata \
         sngrep \
+        curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system siprec \
     && useradd  --system --gid siprec --home-dir /app --shell /usr/sbin/nologin siprec
@@ -58,11 +60,14 @@ EXPOSE 5060/udp
 # Default example config uses 10000-11000 (~500 concurrent sessions).
 # Increase rtp_port_end (and re-EXPOSE here) for higher concurrency deployments.
 EXPOSE 10000-65535/udp
+# Pod-local HTTP control API (agent-assist start/stop, pause/resume). Must
+# match http_listen_addr in config.yaml.
+EXPOSE 8080/tcp
 
-# Liveness probe: check that the process is still running and the SIP port is bound.
-# Adjust the period/retries to suit your orchestrator's expectations.
+# Liveness probe: check that the HTTP control API answers on /healthz, which
+# also confirms the process is up (the SIP/RTP listeners share its lifetime).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD [ "sh", "-c", "kill -0 1 && grep -q 'siprec-recorder' /proc/1/cmdline" ]
+    CMD [ "curl", "-fs", "http://127.0.0.1:8080/healthz" ]
 
 ENTRYPOINT ["siprec-recorder"]
 CMD ["-config", "/app/config.yaml"]
