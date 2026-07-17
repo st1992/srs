@@ -37,3 +37,39 @@ upload_workers: 2
 upload_max_retries: 5
 upload_sweep_interval_sec: 60
 shutdown_upload_timeout_sec: 30
+
+# Pod-local HTTP control API (agent-assist start/stop, pause/resume). See README.md.
+http_listen_addr: "0.0.0.0:8080"
+
+# IP stored in Redis as loc:<Call-ID> so an external router/gateway can find
+# the pod that owns a given call before calling its control API. Leave empty
+# to reuse the same non-loopback address auto-detected for the SIP Contact.
+api_advertise_ip: ""
+
+# Optional bearer token protecting the control API. Leave empty to disable
+# auth (fine for a pod-local API reachable only from a trusted gateway).
+api_auth_token: ""
+
+# Redis is used to register/renew the call locator entries above. Expected to
+# be reachable on a private IP/plain TCP port with no TLS and no AUTH.
+redis_addr: ""
+redis_db: 0
+redis_locator_ttl_seconds: 3600
+
+# Google Agent Assist / Dialogflow. Leave agent_assist_project_id and
+# agent_assist_conversation_profile_id empty to disable the
+# /v1/agent-assist/* endpoints entirely (start requests will fail).
+agent_assist_project_id: ""
+agent_assist_location_id: "global"
+agent_assist_conversation_profile_id: ""
+# Audio sample rate (Hz) negotiated with Dialogflow for both directions.
+agent_assist_sample_rate_hertz: 8000
+# Per-leg bounded queue (packets) pacing audio sent to Dialogflow; when full,
+# WriteRTPPayload errors (triggering automatic fallback to recording) instead
+# of buffering further. ~20ms/packet, so 250 ≈ 5s of audio.
+agent_assist_send_queue_packets: 250
+# Leg labels treated as the end user vs. the human agent when creating
+# Dialogflow participants. Any label not in agent_assist_end_user_labels is
+# treated as a human agent.
+agent_assist_end_user_labels: ["inbound", "1"]
+agent_assist_human_agent_labels: ["outbound", "2"]
