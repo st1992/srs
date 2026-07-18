@@ -13,6 +13,7 @@ import (
 	dialogflow "cloud.google.com/go/dialogflow/apiv2beta1"
 	"cloud.google.com/go/dialogflow/apiv2beta1/dialogflowpb"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -204,12 +205,8 @@ func (c *googleAgentAssistClient) configRequest(participant string, params *stru
 				Participant: participant,
 				Config: &dialogflowpb.BidiStreamingAnalyzeContentRequest_Config_VoiceSessionConfig_{
 					VoiceSessionConfig: &dialogflowpb.BidiStreamingAnalyzeContentRequest_Config_VoiceSessionConfig{
-						InputAudioEncoding:          dialogflowpb.AudioEncoding_AUDIO_ENCODING_MULAW,
-						InputAudioSampleRateHertz:   int32(c.cfg.AgentAssistSampleRateHertz),
-						OutputAudioEncoding:         dialogflowpb.OutputAudioEncoding_OUTPUT_AUDIO_ENCODING_MULAW,
-						OutputAudioSampleRateHertz:  int32(c.cfg.AgentAssistSampleRateHertz),
-						EnableCxProactiveProcessing: true,
-						EnableStreamingSynthesize:   false,
+						InputAudioEncoding:        dialogflowpb.AudioEncoding_AUDIO_ENCODING_MULAW,
+						InputAudioSampleRateHertz: int32(c.cfg.AgentAssistSampleRateHertz),
 					},
 				},
 				InitialVirtualAgentParameters: params,
@@ -308,7 +305,7 @@ func (s *agentAssistSink) fail(err error) {
 		return
 	}
 	s.failOnce.Do(func() {
-		s.log.Error("agent assist bidi send error", "err", err)
+		s.log.Error("agent assist bidi send error", grpcErrorLogArgs(err)...)
 		if s.onError != nil {
 			go s.onError(err)
 		}
@@ -322,13 +319,28 @@ func (s *agentAssistSink) recvLoop() {
 			return
 		}
 		if err != nil {
-			s.log.Error("agent assist bidi receive error", "err", err)
+			s.log.Error("agent assist bidi receive error", grpcErrorLogArgs(err)...)
 			return
 		}
 		if result := resp.GetRecognitionResult(); result != nil {
 			s.log.Debug("agent assist recognition result", "transcript", result.GetTranscript(), "is_final", result.GetIsFinal())
 		}
 	}
+}
+
+// grpcErrorLogArgs expands a gRPC error into slog key/value pairs so the
+// status code and any error details (often the only clue behind a generic
+// "Internal error encountered") show up in logs instead of just the message.
+func grpcErrorLogArgs(err error) []any {
+	st, ok := status.FromError(err)
+	if !ok {
+		return []any{"err", err}
+	}
+	args := []any{"err", err, "grpc_code", st.Code().String()}
+	if details := st.Details(); len(details) > 0 {
+		args = append(args, "grpc_details", fmt.Sprintf("%+v", details))
+	}
+	return args
 }
 
 func conversationIDFromName(name string) string {
