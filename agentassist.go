@@ -54,6 +54,9 @@ func NewAgentAssistClient(ctx context.Context, cfg *Config, log *slog.Logger) (A
 	if cfg.GCPCredentialsFile != "" {
 		opts = append(opts, option.WithCredentialsFile(cfg.GCPCredentialsFile))
 	}
+	if cfg.AgentAssistLocationID != "" && cfg.AgentAssistLocationID != "global" {
+		opts = append(opts, option.WithEndpoint(fmt.Sprintf("%s-dialogflow.googleapis.com:443", cfg.AgentAssistLocationID)))
+	}
 
 	conversations, err := dialogflow.NewConversationsClient(ctx, opts...)
 	if err != nil {
