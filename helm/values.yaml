@@ -88,13 +88,13 @@ recorder:
     httpListenAddr: "0.0.0.0:8080"
     apiAdvertiseIP: ""
     apiAuthToken: ""
-    redisAddr: ""
+    redisAddr: "100.72.86.38:6379"
     redisDB: 0
     redisLocatorTTLSeconds: 3600
     agentAssist:
-      projectId: ""
-      locationId: "global"
-      conversationProfileId: ""
+      projectId: "adtgcp-ent-dev-ccs-tlcm-fe10"
+      locationId: "us-central1"
+      conversationProfileId: "wpooK6HETcOne9L60VjVeA"
       sampleRateHertz: 8000
       sendQueuePackets: 250
       endUserLabels: ["inbound", "1"]
