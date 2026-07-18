@@ -16,9 +16,11 @@ recorder:
     - name: recorder-1
       loadBalancerIP: "100.73.16.54"
       sipPort: 5060
+      httpPort: 8080
     - name: recorder-2
       loadBalancerIP: "100.73.16.64"
       sipPort: 5061
+      httpPort: 8081
 
   # Recorder pods share the node network namespace. SIP ports must be unique
   # per instance; dynamically allocated RTP ports share one node-wide pool.
@@ -85,7 +87,9 @@ recorder:
     uploadMaxRetries: 5
     uploadSweepIntervalSec: 60
     shutdownUploadTimeoutSec: 30
-    httpListenAddr: "0.0.0.0:8080"
+    # Each instance's httpPort supplies the port; instances share a node when
+    # coLocateOnSameNode is true, so the port must be unique per instance.
+    httpListenIP: "0.0.0.0"
     apiAdvertiseIP: ""
     apiAuthToken: ""
     redisAddr: "100.72.86.38:6379"

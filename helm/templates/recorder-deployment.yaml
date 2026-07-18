@@ -2,6 +2,7 @@
 {{- range $index, $instance := $root.Values.recorder.instances }}
 {{- $instanceCtx := dict "root" $root "instance" $instance }}
 {{- $sipPort := int (required (printf "recorder.instances[%d].sipPort is required" $index) $instance.sipPort) }}
+{{- $httpPort := int (required (printf "recorder.instances[%d].httpPort is required" $index) $instance.httpPort) }}
 {{- $persistence := deepCopy $root.Values.recorder.persistence }}
 {{- with $instance.persistence }}
 {{- $persistence = mergeOverwrite $persistence . }}
@@ -35,7 +36,7 @@ spec:
         {{- include "recorder.labels" $root | nindent 8 }}
         cx-streamlink/recorder-instance: {{ include "recorder.instanceName" $instance | quote }}
       annotations:
-        checksum/recorder-config: {{ printf "%s:%s:%d:%s" (toJson $root.Values.recorder.config) (required (printf "recorder.instances[%d].loadBalancerIP is required" $index) $instance.loadBalancerIP) $sipPort (toJson $root.Values.recorder.gcp.credentialsSecret) | sha256sum }}
+        checksum/recorder-config: {{ printf "%s:%s:%d:%d:%s" (toJson $root.Values.recorder.config) (required (printf "recorder.instances[%d].loadBalancerIP is required" $index) $instance.loadBalancerIP) $sipPort $httpPort (toJson $root.Values.recorder.gcp.credentialsSecret) | sha256sum }}
     spec:
       serviceAccountName: {{ include "recorder.serviceAccountName" $root }}
       hostNetwork: {{ $root.Values.recorder.hostNetwork }}
@@ -87,7 +88,7 @@ spec:
               containerPort: {{ $sipPort }}
               protocol: UDP
             - name: http-api
-              containerPort: 8080
+              containerPort: {{ $httpPort }}
               protocol: TCP
           livenessProbe:
             httpGet:

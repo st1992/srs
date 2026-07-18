@@ -43,4 +43,21 @@ data:
     upload_max_retries:  {{ $root.Values.recorder.config.uploadMaxRetries }}
     upload_sweep_interval_sec:   {{ $root.Values.recorder.config.uploadSweepIntervalSec }}
     shutdown_upload_timeout_sec: {{ $root.Values.recorder.config.shutdownUploadTimeoutSec }}
+
+    # Unique per instance: recorder pods share the node's network namespace.
+    http_listen_addr: "{{ $root.Values.recorder.config.httpListenIP }}:{{ required (printf "recorder.instances[%d].httpPort is required" $index) $instance.httpPort }}"
+    api_advertise_ip: "{{ $root.Values.recorder.config.apiAdvertiseIP }}"
+    api_auth_token:   "{{ $root.Values.recorder.config.apiAuthToken }}"
+
+    redis_addr: "{{ $root.Values.recorder.config.redisAddr }}"
+    redis_db:   {{ $root.Values.recorder.config.redisDB }}
+    redis_locator_ttl_seconds: {{ $root.Values.recorder.config.redisLocatorTTLSeconds }}
+
+    agent_assist_project_id:                "{{ $root.Values.recorder.config.agentAssist.projectId }}"
+    agent_assist_location_id:                "{{ $root.Values.recorder.config.agentAssist.locationId }}"
+    agent_assist_conversation_profile_id:   "{{ $root.Values.recorder.config.agentAssist.conversationProfileId }}"
+    agent_assist_sample_rate_hertz:    {{ $root.Values.recorder.config.agentAssist.sampleRateHertz }}
+    agent_assist_send_queue_packets:   {{ $root.Values.recorder.config.agentAssist.sendQueuePackets }}
+    agent_assist_end_user_labels:     {{ toJson $root.Values.recorder.config.agentAssist.endUserLabels }}
+    agent_assist_human_agent_labels:  {{ toJson $root.Values.recorder.config.agentAssist.humanAgentLabels }}
 {{ end }}
