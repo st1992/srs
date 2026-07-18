@@ -8,7 +8,7 @@ namespaceOverride: ""
 # recorder pool; do not scale an individual recorder Deployment.
 recorder:
   image:
-    repository: us-central1-docker.pkg.dev/div-deai-cx-dev-usc1-ri/cx-sip/cx-streamlink-rec
+    repository: us-central1-docker.pkg.dev/div-deai-cx-dev-usc1-ri/cx-sip/cx-streamlink-gaa
     tag: "dev"
     pullPolicy: Always
 
@@ -85,6 +85,20 @@ recorder:
     uploadMaxRetries: 5
     uploadSweepIntervalSec: 60
     shutdownUploadTimeoutSec: 30
+    httpListenAddr: "0.0.0.0:8080"
+    apiAdvertiseIP: ""
+    apiAuthToken: ""
+    redisAddr: ""
+    redisDB: 0
+    redisLocatorTTLSeconds: 3600
+    agentAssist:
+      projectId: ""
+      locationId: "global"
+      conversationProfileId: ""
+      sampleRateHertz: 8000
+      sendQueuePackets: 250
+      endUserLabels: ["inbound", "1"]
+      humanAgentLabels: ["outbound", "2"]
 
 # Stateless signaling proxy. Its dispatcher destinations are generated from
 # recorder.instances and use the recorder Service cluster DNS names.
