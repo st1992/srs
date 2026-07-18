@@ -43,6 +43,11 @@ type googleAgentAssistClient struct {
 	log           *slog.Logger
 	conversations *dialogflow.ConversationsClient
 	participants  *dialogflow.ParticipantsClient
+
+	// streamCtx backs the long-lived bidi audio streams, which must outlive
+	// the HTTP request that starts them. It is canceled only on Close.
+	streamCtx    context.Context
+	streamCancel context.CancelFunc
 }
 
 func NewAgentAssistClient(ctx context.Context, cfg *Config, log *slog.Logger) (AgentAssistClient, error) {
@@ -68,15 +73,19 @@ func NewAgentAssistClient(ctx context.Context, cfg *Config, log *slog.Logger) (A
 		return nil, fmt.Errorf("create participants client: %w", err)
 	}
 
+	streamCtx, streamCancel := context.WithCancel(context.Background())
 	return &googleAgentAssistClient{
 		cfg:           cfg,
 		log:           log.With("component", "agent_assist"),
 		conversations: conversations,
 		participants:  participants,
+		streamCtx:     streamCtx,
+		streamCancel:  streamCancel,
 	}, nil
 }
 
 func (c *googleAgentAssistClient) Close() error {
+	c.streamCancel()
 	var err error
 	if c.participants != nil {
 		err = errors.Join(err, c.participants.Close())
@@ -129,7 +138,7 @@ func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStar
 			return nil, fmt.Errorf("create participant for %s: %w", label, err)
 		}
 
-		stream, err := c.participants.BidiStreamingAnalyzeContent(ctx)
+		stream, err := c.participants.BidiStreamingAnalyzeContent(c.streamCtx)
 		if err != nil {
 			cleanup()
 			return nil, fmt.Errorf("open bidi stream for %s: %w", label, err)
