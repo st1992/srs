@@ -16,11 +16,11 @@ recorder:
     - name: recorder-1
       loadBalancerIP: "100.73.16.54"
       sipPort: 5060
-      httpPort: 8080
+      httpPort: 8090
     - name: recorder-2
       loadBalancerIP: "100.73.16.64"
       sipPort: 5061
-      httpPort: 8081
+      httpPort: 8091
 
   # Recorder pods share the node network namespace. SIP ports must be unique
   # per instance; dynamically allocated RTP ports share one node-wide pool.
