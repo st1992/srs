@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -42,7 +43,7 @@ type fakeAgentAssistClient struct {
 func (c *fakeAgentAssistClient) Start(_ context.Context, req AgentAssistStartRequest) (*agentAssistRun, error) {
 	c.mu.Lock()
 	c.starts++
-	conv := "conv-123"
+	conv := fmt.Sprintf("conv-%d", 122+c.starts)
 	c.mu.Unlock()
 
 	sinks := make(map[string]rtpSink, len(req.Labels))
@@ -140,6 +141,12 @@ func TestAgentAssistStartStopSegmentsRecording(t *testing.T) {
 	assert.Len(t, audio.enqueued, 2)
 	require.Len(t, meta.enqueued, 1)
 
+	// No server-side audio recording happens while in Agent Assist mode: every
+	// leg's sink must be the Agent Assist stream, never a file recording sink.
+	for _, leg := range sess.Legs {
+		assert.Equal(t, "agent_assist", leg.SinkKind())
+	}
+
 	preAssistMeta, err := os.ReadFile(meta.enqueued[0])
 	require.NoError(t, err)
 	assert.Contains(t, string(preAssistMeta), "agent_assist_start")
@@ -163,14 +170,30 @@ func TestAgentAssistStartStopSegmentsRecording(t *testing.T) {
 	assert.True(t, strings.Contains(audio.active[0], "seg") || len(audio.active[0]) > 0)
 }
 
-func TestAgentAssistStartIsIdempotentWhileActive(t *testing.T) {
-	srv, _, _, _, assist := newTestRecorderServer(t)
-	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+func TestAgentAssistStartWhileActiveRestarts(t *testing.T) {
+	srv, sess, _, meta, assist := newTestRecorderServer(t)
+	first, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
 	require.NoError(t, err)
+	assert.Equal(t, "conv-123", first.ConversationID)
+
 	again, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
 	require.NoError(t, err)
-	assert.Equal(t, "conv-123", again.ConversationID)
-	assert.Equal(t, 1, assist.starts)
+	assert.Equal(t, "conv-124", again.ConversationID)
+	assert.NotEqual(t, first.ConversationID, again.ConversationID)
+	assert.Equal(t, sessionModeAgentAssist, again.State)
+	assert.Equal(t, sessionModeAgentAssist, sess.Mode)
+
+	assert.Equal(t, 2, assist.starts)
+	assert.Equal(t, 1, assist.completes) // the superseded (first) conversation was completed
+
+	// meta.enqueued[0] is the initial recording segment closed by the first
+	// StartAgentAssist call; meta.enqueued[1] is the first agent_assist
+	// segment, closed out by the restart.
+	require.Len(t, meta.enqueued, 2)
+	restartMeta, err := os.ReadFile(meta.enqueued[1])
+	require.NoError(t, err)
+	assert.Contains(t, string(restartMeta), "agent_assist_restart")
+	assert.Contains(t, string(restartMeta), "conv-123")
 }
 
 func TestPauseDuringRecordingBlocksWriteAndResumeRestores(t *testing.T) {

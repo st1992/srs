@@ -56,7 +56,7 @@ Liveness check. No auth required.
 
 ### `POST /v1/agent-assist/start`
 
-Switches the call from default recording to Google Agent Assist. Idempotent: calling it again while already in Agent Assist mode returns the existing conversation without starting a new one.
+Switches the call from default recording to Google Agent Assist. Calling it again while already in Agent Assist mode **restarts** it: the current conversation is gracefully completed (and its segment metadata JSON written/uploaded) and a brand-new conversation is started immediately — the call never bounces back through recording mode in between.
 
 **Request**
 ```json
@@ -85,7 +85,7 @@ Switches the call from default recording to Google Agent Assist. Idempotent: cal
 | `400` | missing/empty `call_id`, malformed JSON |
 | `401` | missing/invalid auth |
 | `404` | no session found for `call_id` |
-| `409` | call is paused, or call is not currently in `recording` mode |
+| `409` | call is paused, or call is closed |
 | `500` | Agent Assist backend error (e.g. Dialogflow conversation creation failed) |
 
 ---
@@ -184,7 +184,7 @@ See `config.example.yaml` for the full set of options. API-relevant fields:
 |---|---|---|
 | `http_listen_addr` | `0.0.0.0:8080` | Address this API listens on |
 | `api_auth_token` | *(empty)* | Bearer token required on every request; unset disables auth |
-| `api_advertise_ip` | *(auto-detected)* | IP stored in the Redis call locator so an external router can find the pod owning a `call_id` |
+| `api_advertise_ip` | *(auto-detected)* | IP stored (as `ip:port`, paired with the `http_listen_addr` port) in the Redis call locator so an external router can find the pod owning a `call_id` |
 | `agent_assist_project_id` / `agent_assist_conversation_profile_id` | *(empty)* | Required to enable `/v1/agent-assist/*`; if unset, start requests fail with a disabled-client error |
 
 ## Docker

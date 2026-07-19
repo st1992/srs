@@ -66,7 +66,8 @@ type Config struct {
 	// APIs such as Agent Assist start/stop.
 	HTTPListenAddr string `yaml:"http_listen_addr"`
 
-	// APIAdvertiseIP is the IP stored in Redis loc:<Call-ID>. If empty, the
+	// APIAdvertiseIP is the IP portion of the "ip:port" value stored in Redis
+	// loc:<Call-ID> (the port is taken from HTTPListenAddr). If empty, the
 	// recorder uses the same non-loopback address detection as SIP Contact.
 	APIAdvertiseIP string `yaml:"api_advertise_ip"`
 

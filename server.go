@@ -22,24 +22,25 @@ const locatorOperationTimeout = 500 * time.Millisecond
 
 // recorderServer is the minimal SIPREC recording SIP server.
 type recorderServer struct {
-	cfg            *Config
-	log            *slog.Logger
-	ua             *sipgo.UserAgent
-	srv            *sipgo.Server
-	sessions       *sessionStore
-	uploader       Uploader // audio recording (.ulaw) uploader
-	metaUploader   Uploader // per-call metadata JSON uploader
-	locator        CallLocator
-	assist         AgentAssistClient
-	listener       net.PacketConn
-	mediaIP        string
-	apiAdvertiseIP string
-	locatorTTL     time.Duration
-	leaseMu        sync.Mutex
-	leases         map[string]struct{}
-	renewerStop    chan struct{}
-	renewerDone    chan struct{}
-	renewerOnce    sync.Once
+	cfg              *Config
+	log              *slog.Logger
+	ua               *sipgo.UserAgent
+	srv              *sipgo.Server
+	sessions         *sessionStore
+	uploader         Uploader // audio recording (.ulaw) uploader
+	metaUploader     Uploader // per-call metadata JSON uploader
+	locator          CallLocator
+	assist           AgentAssistClient
+	listener         net.PacketConn
+	mediaIP          string
+	apiAdvertiseIP   string
+	apiAdvertisePort int
+	locatorTTL       time.Duration
+	leaseMu          sync.Mutex
+	leases           map[string]struct{}
+	renewerStop      chan struct{}
+	renewerDone      chan struct{}
+	renewerOnce      sync.Once
 	// sipContactHost / sipContactPort are stamped into the Contact header of
 	// every 200 OK we send. They MUST resolve back to this pod's SIP socket
 	// from the SBC's perspective, otherwise in-dialog ACK/BYE either loop
@@ -91,6 +92,10 @@ func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, locator Ca
 	if apiAdvertiseIP == "" {
 		apiAdvertiseIP = sipHost
 	}
+	_, apiAdvertisePort, err := splitHostPortTCP(cfg.HTTPListenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid http_listen_addr %q: %w", cfg.HTTPListenAddr, err)
+	}
 	if locator == nil {
 		locator = disabledLocator{reason: "not configured"}
 	}
@@ -99,23 +104,24 @@ func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, locator Ca
 	}
 
 	s := &recorderServer{
-		cfg:            cfg,
-		log:            log,
-		ua:             ua,
-		srv:            srv,
-		sessions:       newSessionStore(),
-		uploader:       uploader,
-		metaUploader:   metaUploader,
-		locator:        locator,
-		assist:         assist,
-		mediaIP:        mediaIP,
-		apiAdvertiseIP: apiAdvertiseIP,
-		locatorTTL:     time.Duration(cfg.RedisLocatorTTLSeconds) * time.Second,
-		leases:         make(map[string]struct{}),
-		renewerStop:    make(chan struct{}),
-		renewerDone:    make(chan struct{}),
-		sipContactHost: sipHost,
-		sipContactPort: sipPort,
+		cfg:              cfg,
+		log:              log,
+		ua:               ua,
+		srv:              srv,
+		sessions:         newSessionStore(),
+		uploader:         uploader,
+		metaUploader:     metaUploader,
+		locator:          locator,
+		assist:           assist,
+		mediaIP:          mediaIP,
+		apiAdvertiseIP:   apiAdvertiseIP,
+		apiAdvertisePort: apiAdvertisePort,
+		locatorTTL:       time.Duration(cfg.RedisLocatorTTLSeconds) * time.Second,
+		leases:           make(map[string]struct{}),
+		renewerStop:      make(chan struct{}),
+		renewerDone:      make(chan struct{}),
+		sipContactHost:   sipHost,
+		sipContactPort:   sipPort,
 	}
 
 	srv.OnInvite(s.onInvite)
@@ -318,8 +324,9 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 		return
 	}
 
+	locatorValue := fmt.Sprintf("%s:%d", s.apiAdvertiseIP, s.apiAdvertisePort)
 	locatorCtx, locatorCancel := s.locatorContext()
-	err = s.locator.Register(locatorCtx, callID, s.apiAdvertiseIP, s.locatorTTL)
+	err = s.locator.Register(locatorCtx, callID, locatorValue, s.locatorTTL)
 	locatorCancel()
 	if err != nil {
 		log.Error("failed to register call locator", "err", err)
@@ -437,6 +444,17 @@ type agentAssistResult struct {
 	State          sessionMode
 }
 
+// canStartAgentAssistLocked reports whether the session is in a state from
+// which Agent Assist can be (re)started: either currently recording (a fresh
+// start), or already in Agent Assist with a live run (a restart that closes
+// the current conversation and opens a new one). Callers must hold sess.mu.
+func canStartAgentAssistLocked(sess *recSession) bool {
+	if sess.Mode == sessionModeRecording {
+		return true
+	}
+	return sess.Mode == sessionModeAgentAssist && sess.AgentAssist != nil
+}
+
 func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, metadata map[string]any) (*agentAssistResult, error) {
 	sess, ok := s.sessions.Get(callID)
 	if !ok {
@@ -444,16 +462,11 @@ func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, me
 	}
 
 	sess.mu.Lock()
-	if sess.Mode == sessionModeAgentAssist && sess.AgentAssist != nil {
-		result := &agentAssistResult{CallID: callID, ConversationID: sess.AgentAssist.ConversationID, State: sess.Mode}
-		sess.mu.Unlock()
-		return result, nil
-	}
 	if sess.Paused {
 		sess.mu.Unlock()
 		return nil, fmt.Errorf("%w: cannot start agent assist while paused", errCallPaused)
 	}
-	if sess.Mode != sessionModeRecording {
+	if !canStartAgentAssistLocked(sess) {
 		state := sess.Mode
 		sess.mu.Unlock()
 		return nil, fmt.Errorf("%w: cannot start agent assist from state %s", errInvalidTransition, state)
@@ -476,6 +489,7 @@ func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, me
 
 	var oldSinks []rtpSink
 	var completed *callSegment
+	var previousRun *agentAssistRun
 	now := time.Now().UTC()
 
 	sess.mu.Lock()
@@ -484,12 +498,13 @@ func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, me
 		_ = run.complete(context.Background())
 		return nil, fmt.Errorf("%w: cannot start agent assist while paused", errCallPaused)
 	}
-	if sess.Mode != sessionModeRecording {
+	if !canStartAgentAssistLocked(sess) {
 		state := sess.Mode
 		sess.mu.Unlock()
 		_ = run.complete(context.Background())
 		return nil, fmt.Errorf("%w: cannot start agent assist from state %s", errInvalidTransition, state)
 	}
+	restarting := sess.Mode == sessionModeAgentAssist
 	for _, leg := range sess.Legs {
 		next, ok := run.Sinks[leg.label]
 		if !ok {
@@ -502,7 +517,12 @@ func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, me
 	if sess.CurrentSegment != nil {
 		sess.CurrentSegment.RequestMetadata = metadata
 	}
-	completed = sess.completeCurrentSegmentLocked(now, "agent_assist_start")
+	reason := "agent_assist_start"
+	if restarting {
+		reason = "agent_assist_restart"
+	}
+	completed = sess.completeCurrentSegmentLocked(now, reason)
+	previousRun = sess.AgentAssist
 	sess.Mode = sessionModeAgentAssist
 	sess.AgentAssist = run
 	sess.CurrentSegment = &callSegment{
@@ -525,6 +545,9 @@ func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, me
 		if p := sink.Path(); p != "" {
 			s.uploader.Enqueue(p)
 		}
+	}
+	if err := previousRun.complete(context.Background()); err != nil {
+		s.log.Error("failed to complete superseded agent assist conversation", "err", err, "sipCallID", callID, "conversationID", previousRun.ConversationID)
 	}
 	if completed != nil {
 		if metaPath, err := s.writeSegmentMetadataJSON(sess, completed, nil); err != nil {
@@ -872,13 +895,15 @@ func (s *recorderServer) writeSegmentMetadataJSON(sess *recSession, seg *callSeg
 		return "", fmt.Errorf("marshal metadata: %w", err)
 	}
 
-	name := fmt.Sprintf("%s-%s-%s-%d-seg%03d-%s.json",
+	segStart := sess.CreatedAt
+	if t, perr := time.Parse(time.RFC3339Nano, seg.StartTime); perr == nil {
+		segStart = t
+	}
+	name := fmt.Sprintf("%s-%s-%s-%d.json",
 		sanitizeFileComponent(sess.CallID),
 		sanitizeFileComponent(sess.DNIS),
 		sanitizeFileComponent(sess.ANI),
-		sess.CreatedAt.UnixMilli(),
-		seg.Sequence,
-		sanitizeFileComponent(string(seg.Mode)),
+		segStart.UnixMilli(),
 	)
 	p := filepath.Join(s.cfg.RecordingDir, name)
 	if err := os.WriteFile(p, data, 0o644); err != nil {
@@ -946,6 +971,19 @@ func splitHostPort(addr string) (string, int, error) {
 		return "", 0, err
 	}
 	port, err := net.LookupPort("udp", portStr)
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid port %q: %w", portStr, err)
+	}
+	return host, port, nil
+}
+
+// splitHostPortTCP is splitHostPort for TCP-based addresses (e.g. http_listen_addr).
+func splitHostPortTCP(addr string) (string, int, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", 0, err
+	}
+	port, err := net.LookupPort("tcp", portStr)
 	if err != nil {
 		return "", 0, fmt.Errorf("invalid port %q: %w", portStr, err)
 	}
