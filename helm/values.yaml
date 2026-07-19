@@ -97,8 +97,8 @@ recorder:
     redisLocatorTTLSeconds: 3600
     agentAssist:
       projectId: "adtgcp-ent-dev-ccs-tlcm-fe10"
-      locationId: "us-central1"
-      conversationProfileId: "wpooK6HETcOne9L60VjVeA"
+      locationId: "global"
+      conversationProfileId: "m77q1fWRQ4ekBZ56L9UPbQ"
       sampleRateHertz: 8000
       sendQueuePackets: 250
       endUserLabels: ["inbound", "1"]
