@@ -14,10 +14,10 @@ recorder:
 
   instances:
     - name: recorder-1
-      loadBalancerIP: "100.73.16.54"
+      loadBalancerIP: "100.73.23.145"
       sipPort: 5060
     - name: recorder-2
-      loadBalancerIP: "100.73.16.64"
+      loadBalancerIP: "100.73.23.146"
       sipPort: 5061
 
   # Recorder pods share the node network namespace. SIP ports must be unique
@@ -62,7 +62,7 @@ recorder:
 
   gcp:
     workloadIdentity:
-      gcpServiceAccount: "adtgcp-ccs-dev-insight-sa@adtgcp-ent-dev-ccs-tlcm-fe10.iam.gserviceaccount.com"
+      gcpServiceAccount: "adtgcp-ccs-tst-insight-sa@adtgcp-ent-tst-ccs-tlcm-8143.iam.gserviceaccount.com"
 
     credentialsSecret:
       name: ""
@@ -76,9 +76,9 @@ recorder:
     rtpPortStart: 10000
     rtpPortEnd: 30000
     recordingDir: "/app/recordings"
-    gcsBucket: "cx-siprec-audio-raw"
+    gcsBucket: "cx-siprec-audio-raw-uat"
     gcsObjectPrefix: "rec"
-    gcsMetadataBucket: "cx-siprec-metadata"
+    gcsMetadataBucket: "cx-siprec-metadata-uat"
     gcsMetadataObjectPrefix: "metadata"
     deleteAfterUpload: true
     uploadWorkers: 4
@@ -111,7 +111,7 @@ proxy:
   service:
     type: LoadBalancer
     port: 5060
-    loadBalancerIP: "100.73.16.5"
+    loadBalancerIP: "100.73.23.134"
     loadBalancerClass: ""
     loadBalancerSourceRanges: []
     annotations:
