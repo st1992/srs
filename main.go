@@ -9,37 +9,15 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 )
-
-// buildExpires is injected at build time via -ldflags "-X main.buildExpires=YYYY-MM-DD".
-// Defaults to 2026-09-14 (3 months from the initial release).
-var buildExpires = "2026-09-14"
-
-func checkExpiry() error {
-	exp, err := time.Parse("2006-01-02", buildExpires)
-	if err != nil {
-		return fmt.Errorf("invalid build expiry date %q: %w", buildExpires, err)
-	}
-	if time.Now().UTC().After(exp.Add(24 * time.Hour)) {
-		return fmt.Errorf("this build expired on %s", buildExpires)
-	}
-	return nil
-}
 
 func main() {
 	// Bootstrap logger for errors before the configured log level is known.
 	log := newLogger(slog.LevelInfo)
-
-	if err := checkExpiry(); err != nil {
-		log.Error("build expiry check failed", "err", err, "expires", buildExpires)
-		os.Exit(1)
-	}
 
 	configPath := flag.String("config", "config.yaml", "path to the YAML configuration file")
 	flag.Parse()

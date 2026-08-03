@@ -11,16 +11,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 
 # Build the static binary.
-# BUILD_EXPIRES can be overridden at build time:
-#   docker build --build-arg BUILD_EXPIRES=2026-09-14 .
-# Defaults to 3 months from the Go module's initial release date.
-ARG BUILD_EXPIRES=2026-09-14
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux \
     go build -trimpath \
-    -ldflags="-s -w -X main.buildExpires=${BUILD_EXPIRES}" \
+    -ldflags="-s -w" \
     -o /out/siprec-recorder .
 
 # ---- Runtime stage ----
