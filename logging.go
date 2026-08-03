@@ -95,17 +95,19 @@ func gcpReplaceAttr(_ []string, a slog.Attr) slog.Attr {
 // Structured event names attached to log lines that should be filterable/
 // alertable in Cloud Logging without matching on message text.
 const (
-	eventCallEstablished  = "call_established"
-	eventCallRejected     = "call_rejected"
-	eventCallEnded        = "call_ended"
-	eventPortExhausted    = "port_exhausted"
-	eventRecordingStalled = "recording_stalled"
-	eventNoRTPReceived    = "no_rtp_received"
-	eventSessionStale     = "session_stale"
-	eventPanicRecovered   = "panic_recovered"
-	eventUploadSucceeded  = "upload_succeeded"
-	eventUploadFailed     = "upload_failed"
-	eventUploadExhausted  = "upload_exhausted"
+	eventCallEstablished    = "call_established"
+	eventCallRejected       = "call_rejected"
+	eventCallEnded          = "call_ended"
+	eventPortExhausted      = "port_exhausted"
+	eventRecordingStalled   = "recording_stalled"
+	eventNoRTPReceived      = "no_rtp_received"
+	eventSessionStale       = "session_stale"
+	eventPanicRecovered     = "panic_recovered"
+	eventUploadSucceeded    = "upload_succeeded"
+	eventUploadFailed       = "upload_failed"
+	eventUploadExhausted    = "upload_exhausted"
+	eventLicenseCheckPassed = "license_check_passed"
+	eventLicenseCheckFailed = "license_check_failed"
 )
 
 // recoverAndLog is deferred at the top of goroutines/handlers this process

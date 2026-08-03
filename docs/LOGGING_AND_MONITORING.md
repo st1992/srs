@@ -85,6 +85,8 @@ thinking to update an alert). Full catalog, in rough call-flow order:
 | `upload_succeeded` | INFO | File uploaded to GCS | `attempt`, `file`, `object` | `gcs.go` process() |
 | `upload_failed` | WARNING | One upload attempt failed, will retry | `attempt`, `err` | `gcs.go` process() |
 | `upload_exhausted` | ERROR | All retry attempts failed; file left on local disk for next sweep | `file` | `gcs.go` process() |
+| `license_check_passed` | INFO | GCP license/entitlement check (BigQuery IAM permission test against `div-aais-cx-store-usc1-dev.gcp_license_dataset.gcp-license`) passed | `principal`, `resource` | `main.go` (via `gcp-license-guard-go`), checked at startup and every `licenseCheckInterval` (1h, hardcoded) |
+| `license_check_failed` | **CRITICAL** | License check denied or errored — **process calls `os.Exit(1)` immediately** from the on-failure hook, both at startup and on any periodic recheck | `principal`, `resource`, `status`, `missing_permissions`, `err` | `main.go` |
 
 ## 4. Config reference
 
@@ -97,6 +99,10 @@ All in `config.go` / `config.example.yaml` / `helm/values.yaml`
 | `RTPNoMediaTimeoutSec` | `rtp_no_media_timeout_sec` | `5` | Grace period before `no_rtp_received`; `<=0` disables |
 | `MaxCallDurationHours` | `max_call_duration_hours` | `12` | Age threshold for `session_stale`; `<=0` disables |
 | `StaleSessionCheckIntervalSec` | `stale_session_check_interval_sec` | `300` | How often the reaper scans for stale sessions |
+
+License check target and interval are **not** config-driven (hardcoded in
+`main.go`): BigQuery resource `div-aais-cx-store-usc1-dev.gcp_license_dataset.gcp-license`,
+recheck interval `licenseCheckInterval` = 1 hour.
 
 ## 5. Alert policies
 
@@ -112,6 +118,7 @@ policy** on that metric. Ordered by priority.
 | ⬜ | `recorder-recording-stalled` | `jsonPayload.event="recording_stalled"` | Any occurrence (redundant with above, but useful as its own metric to see stall rate over time separate from other Criticals) |
 | ⬜ | `recorder-session-stale` | `jsonPayload.event="session_stale"` | Any occurrence |
 | ⬜ | `recorder-panic` | `jsonPayload.event="panic_recovered"` | Any occurrence |
+| ⬜ | `recorder-license-failed` | `jsonPayload.event="license_check_failed"` | Any occurrence — the process has already exited by the time this fires, so this is a straight up/down signal, not early warning |
 
 ### 5.2 Investigate soon (capacity / degradation)
 

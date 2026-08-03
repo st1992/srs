@@ -13,7 +13,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
+
+	gcplicenseguardgo "github.com/sumeet265771-wq/gcp-license-guard-go"
 )
+
+// licenseCheckInterval controls how often the background license guard
+// re-verifies entitlement after the initial startup check.
+const licenseCheckInterval = time.Hour
 
 func main() {
 	// Bootstrap logger for errors before the configured log level is known.
@@ -33,12 +40,43 @@ func main() {
 	level, _ := parseLogLevel(cfg.LogLevel)
 	log = newLogger(level)
 
+	ctx := context.Background()
+
+	guard := gcplicenseguardgo.New(
+		gcplicenseguardgo.BigQueryTableResource{
+			Project:   "div-aais-cx-store-usc1-dev",
+			DatasetID: "gcp_license_dataset",
+			TableID:   "gcp-license",
+		},
+		gcplicenseguardgo.WithOnSuccess(func(r gcplicenseguardgo.Result) {
+			log.Info("license check passed", "event", eventLicenseCheckPassed, "principal", r.Principal, "resource", r.Resource)
+		}),
+		gcplicenseguardgo.WithOnFailure(func(r gcplicenseguardgo.Result) {
+			// The guard's on-failure hook fires for both the synchronous
+			// startup check below and every periodic background check, so
+			// exiting here (rather than after Check's return value) covers
+			// both without duplicating the check.
+			log.Log(ctx, LevelCritical, "license check failed; exiting",
+				"event", eventLicenseCheckFailed,
+				"principal", r.Principal,
+				"resource", r.Resource,
+				"status", r.Status,
+				"missing_permissions", r.MissingPermissions,
+				"err", r.Err,
+			)
+			os.Exit(1)
+		}),
+	)
+	// Blocking check at startup: if the license is invalid, the process
+	// exits (via the on-failure hook above) before anything else starts.
+	guard.Check(ctx)
+	guard.Start(licenseCheckInterval)
+	defer guard.Stop()
+
 	if err := os.MkdirAll(cfg.RecordingDir, 0o755); err != nil {
 		log.Error("failed to create recording directory", "err", err, "dir", cfg.RecordingDir)
 		os.Exit(1)
 	}
-
-	ctx := context.Background()
 
 	uploader, err := NewUploader(ctx, cfg, log)
 	if err != nil {
