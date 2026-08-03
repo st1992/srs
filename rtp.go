@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"time"
 
 	"github.com/pion/rtp"
 )
@@ -27,13 +29,20 @@ type rtpRecorder struct {
 	packets atomic.Uint64
 	bytes   atomic.Uint64
 	done    chan struct{}
+
+	noMediaTimer *time.Timer
 }
 
 // newRTPRecorder creates and opens the .ulaw output file for a leg.
 // The filename format is: {callID}-{dnis}-{ani}-{startTimeMs}-{label}.ulaw
 // where '-' is the field separator and each component is sanitized so it
 // never contains '-' (component-internal '-' becomes '_').
-func newRTPRecorder(conn *net.UDPConn, recordingDir, callID, dnis, ani string, startTimeMs int64, label string, pcmuPT uint8, log *slog.Logger) (*rtpRecorder, error) {
+//
+// noMediaTimeoutSec, if > 0, starts a one-shot watchdog that logs a warning
+// if zero RTP packets have been received by the time it fires — the SBC
+// negotiated media for this leg but never sent any, which otherwise
+// produces a valid-looking empty recording with no log signal at all.
+func newRTPRecorder(conn *net.UDPConn, recordingDir, callID, dnis, ani string, startTimeMs int64, label string, pcmuPT uint8, noMediaTimeoutSec int, log *slog.Logger) (*rtpRecorder, error) {
 	name := fmt.Sprintf("%s-%s-%s-%d-%s.ulaw",
 		sanitizeFileComponent(callID),
 		sanitizeFileComponent(dnis),
@@ -48,7 +57,7 @@ func newRTPRecorder(conn *net.UDPConn, recordingDir, callID, dnis, ani string, s
 		return nil, fmt.Errorf("failed to create recording file %q: %w", path, err)
 	}
 
-	return &rtpRecorder{
+	r := &rtpRecorder{
 		conn:   conn,
 		file:   f,
 		path:   path,
@@ -56,7 +65,20 @@ func newRTPRecorder(conn *net.UDPConn, recordingDir, callID, dnis, ani string, s
 		pcmuPT: pcmuPT,
 		log:    log.With("label", label, "file", path),
 		done:   make(chan struct{}),
-	}, nil
+	}
+
+	if noMediaTimeoutSec > 0 {
+		r.noMediaTimer = time.AfterFunc(time.Duration(noMediaTimeoutSec)*time.Second, func() {
+			if r.packets.Load() == 0 && !r.closed.Load() {
+				r.log.Warn("no RTP packets received within timeout after recording started",
+					"event", eventNoRTPReceived,
+					"timeout_sec", noMediaTimeoutSec,
+				)
+			}
+		})
+	}
+
+	return r, nil
 }
 
 // Path returns the absolute or relative path of the .ulaw output file.
@@ -73,7 +95,11 @@ func (r *rtpRecorder) run() {
 			if r.closed.Load() {
 				return
 			}
-			r.log.Error("RTP read error", "err", err)
+			// The call is presumably still active in the session store, but
+			// this leg's audio capture just died — silent data loss unless
+			// flagged loudly.
+			r.log.Log(context.Background(), LevelCritical, "RTP read error; recording stopped while call may still be active",
+				"event", eventRecordingStalled, "err", err)
 			return
 		}
 
@@ -89,7 +115,8 @@ func (r *rtpRecorder) run() {
 		}
 
 		if _, err := r.file.Write(pkt.Payload); err != nil {
-			r.log.Error("failed to write RTP payload", "err", err)
+			r.log.Log(context.Background(), LevelCritical, "failed to write RTP payload; recording stopped while call may still be active",
+				"event", eventRecordingStalled, "err", err)
 			return
 		}
 		r.packets.Add(1)
@@ -101,6 +128,9 @@ func (r *rtpRecorder) run() {
 func (r *rtpRecorder) Close() {
 	if !r.closed.CompareAndSwap(false, true) {
 		return
+	}
+	if r.noMediaTimer != nil {
+		r.noMediaTimer.Stop()
 	}
 	if r.conn != nil {
 		_ = r.conn.Close()

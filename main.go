@@ -33,7 +33,8 @@ func checkExpiry() error {
 }
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Bootstrap logger for errors before the configured log level is known.
+	log := newLogger(slog.LevelInfo)
 
 	if err := checkExpiry(); err != nil {
 		log.Error("build expiry check failed", "err", err, "expires", buildExpires)
@@ -48,6 +49,11 @@ func main() {
 		log.Error("failed to load configuration", "err", err)
 		os.Exit(1)
 	}
+
+	// Rebuild the logger at the configured level now that config is loaded
+	// (LoadConfig already validated cfg.LogLevel parses).
+	level, _ := parseLogLevel(cfg.LogLevel)
+	log = newLogger(level)
 
 	if err := os.MkdirAll(cfg.RecordingDir, 0o755); err != nil {
 		log.Error("failed to create recording directory", "err", err, "dir", cfg.RecordingDir)

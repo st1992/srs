@@ -85,6 +85,10 @@ recorder:
     uploadMaxRetries: 5
     uploadSweepIntervalSec: 60
     shutdownUploadTimeoutSec: 30
+    logLevel: "info"
+    rtpNoMediaTimeoutSec: 5
+    maxCallDurationHours: 12
+    staleSessionCheckIntervalSec: 300
 
 # Stateless signaling proxy. Its dispatcher destinations are generated from
 # recorder.instances and use the recorder Service cluster DNS names.

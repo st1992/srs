@@ -93,6 +93,18 @@ func (s *sessionStore) Exists(callID string) bool {
 	return ok
 }
 
+// Snapshot returns a point-in-time copy of all active sessions. Unlike
+// DrainAll, the store is left unmodified.
+func (s *sessionStore) Snapshot() []*recSession {
+	s.mu.RLock()
+	sessions := make([]*recSession, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		sessions = append(sessions, sess)
+	}
+	s.mu.RUnlock()
+	return sessions
+}
+
 // Delete removes a session from the store and returns it if present.
 func (s *sessionStore) Delete(callID string) (*recSession, bool) {
 	s.mu.Lock()

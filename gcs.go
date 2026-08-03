@@ -35,7 +35,7 @@ type noopUploader struct {
 	log *slog.Logger
 }
 
-func (n *noopUploader) MarkActive(string)       {}
+func (n *noopUploader) MarkActive(string)        {}
 func (n *noopUploader) Enqueue(p string)         { n.log.Debug("GCS upload disabled; keeping file", "file", p) }
 func (n *noopUploader) Sweep()                   {}
 func (n *noopUploader) Shutdown(context.Context) {}
@@ -227,7 +227,7 @@ func (u *gcsUploader) process(p string) {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		err := u.upload(p, objectName)
 		if err == nil {
-			log.Info("uploaded recording to GCS", "attempt", attempt)
+			log.Info("uploaded recording to GCS", "event", eventUploadSucceeded, "attempt", attempt)
 			if u.deleteAfter {
 				if rmErr := os.Remove(p); rmErr != nil {
 					log.Error("upload succeeded but local delete failed", "err", rmErr)
@@ -238,7 +238,7 @@ func (u *gcsUploader) process(p string) {
 			return
 		}
 
-		log.Warn("GCS upload attempt failed", "attempt", attempt, "err", err)
+		log.Warn("GCS upload attempt failed", "event", eventUploadFailed, "attempt", attempt, "err", err)
 		if attempt < maxAttempts {
 			backoff := time.Duration(attempt) * time.Second
 			select {
@@ -249,7 +249,7 @@ func (u *gcsUploader) process(p string) {
 		}
 	}
 
-	log.Error("giving up uploading recording; left on local disk for next sweep")
+	log.Error("giving up uploading recording; left on local disk for next sweep", "event", eventUploadExhausted)
 }
 
 // upload streams the file to GCS and finalizes the object.

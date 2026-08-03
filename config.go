@@ -61,22 +61,46 @@ type Config struct {
 	// ShutdownUploadTimeoutSec bounds how long shutdown waits for in-flight
 	// uploads to drain. Defaults to 30 seconds.
 	ShutdownUploadTimeoutSec int `yaml:"shutdown_upload_timeout_sec"`
+
+	// LogLevel controls the minimum severity emitted by the application
+	// logger: trace, debug, info, notice, warn, error, or critical.
+	// Defaults to "info".
+	LogLevel string `yaml:"log_level"`
+
+	// RTPNoMediaTimeoutSec is how long to wait after a recording leg starts
+	// before logging a warning if zero RTP packets have been received (the
+	// SBC negotiated media but never sent any). <= 0 disables the watchdog.
+	// Defaults to 5 seconds.
+	RTPNoMediaTimeoutSec int `yaml:"rtp_no_media_timeout_sec"`
+
+	// MaxCallDurationHours flags (logs only; does not terminate) any
+	// in-progress session older than this as stale, e.g. a BYE that was
+	// lost when an SBC crashed. <= 0 disables the check. Defaults to 12.
+	MaxCallDurationHours int `yaml:"max_call_duration_hours"`
+
+	// StaleSessionCheckIntervalSec controls how often the session store is
+	// scanned for stale sessions. Defaults to 300 seconds.
+	StaleSessionCheckIntervalSec int `yaml:"stale_session_check_interval_sec"`
 }
 
 // DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		SIPListenAddr:            "0.0.0.0:5060",
-		RTPPortStart:             10000,
-		RTPPortEnd:               11000,
-		RecordingDir:             ".",
-		GCSObjectPrefix:          "recordings",
-		GCSMetadataObjectPrefix:  "metadata",
-		DeleteAfterUpload:        true,
-		UploadWorkers:            2,
-		UploadMaxRetries:         5,
-		UploadSweepIntervalSec:   60,
-		ShutdownUploadTimeoutSec: 30,
+		SIPListenAddr:                "0.0.0.0:5060",
+		RTPPortStart:                 10000,
+		RTPPortEnd:                   11000,
+		RecordingDir:                 ".",
+		GCSObjectPrefix:              "recordings",
+		GCSMetadataObjectPrefix:      "metadata",
+		DeleteAfterUpload:            true,
+		UploadWorkers:                2,
+		UploadMaxRetries:             5,
+		UploadSweepIntervalSec:       60,
+		ShutdownUploadTimeoutSec:     30,
+		LogLevel:                     "info",
+		RTPNoMediaTimeoutSec:         5,
+		MaxCallDurationHours:         12,
+		StaleSessionCheckIntervalSec: 300,
 	}
 }
 
@@ -114,6 +138,9 @@ func (c *Config) Validate() error {
 	}
 	if c.RecordingDir == "" {
 		return fmt.Errorf("recording_dir must be set")
+	}
+	if _, err := parseLogLevel(c.LogLevel); err != nil {
+		return err
 	}
 	return nil
 }

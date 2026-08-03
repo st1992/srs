@@ -52,6 +52,10 @@ func TestLoadConfig_AppliesDefaults(t *testing.T) {
 	assert.Equal(t, def.RTPPortStart, cfg.RTPPortStart)
 	assert.Equal(t, def.RTPPortEnd, cfg.RTPPortEnd)
 	assert.Equal(t, def.RecordingDir, cfg.RecordingDir)
+	assert.Equal(t, def.LogLevel, cfg.LogLevel)
+	assert.Equal(t, def.RTPNoMediaTimeoutSec, cfg.RTPNoMediaTimeoutSec)
+	assert.Equal(t, def.MaxCallDurationHours, cfg.MaxCallDurationHours)
+	assert.Equal(t, def.StaleSessionCheckIntervalSec, cfg.StaleSessionCheckIntervalSec)
 }
 
 func TestLoadConfig_MissingFile(t *testing.T) {
@@ -70,6 +74,8 @@ func TestConfigValidate(t *testing.T) {
 		{name: "zero start port", mutate: func(c *Config) { c.RTPPortStart = 0 }, wantErr: true},
 		{name: "start after end", mutate: func(c *Config) { c.RTPPortStart, c.RTPPortEnd = 30000, 20000 }, wantErr: true},
 		{name: "empty recording dir", mutate: func(c *Config) { c.RecordingDir = "" }, wantErr: true},
+		{name: "invalid log level", mutate: func(c *Config) { c.LogLevel = "verbose" }, wantErr: true},
+		{name: "valid log level", mutate: func(c *Config) { c.LogLevel = "critical" }, wantErr: false},
 	}
 
 	for _, tt := range tests {

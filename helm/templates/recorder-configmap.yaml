@@ -43,4 +43,9 @@ data:
     upload_max_retries:  {{ $root.Values.recorder.config.uploadMaxRetries }}
     upload_sweep_interval_sec:   {{ $root.Values.recorder.config.uploadSweepIntervalSec }}
     shutdown_upload_timeout_sec: {{ $root.Values.recorder.config.shutdownUploadTimeoutSec }}
+
+    log_level: "{{ $root.Values.recorder.config.logLevel | default "info" }}"
+    rtp_no_media_timeout_sec:         {{ $root.Values.recorder.config.rtpNoMediaTimeoutSec | default 5 }}
+    max_call_duration_hours:          {{ $root.Values.recorder.config.maxCallDurationHours | default 12 }}
+    stale_session_check_interval_sec: {{ $root.Values.recorder.config.staleSessionCheckIntervalSec | default 300 }}
 {{ end }}

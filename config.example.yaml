@@ -37,3 +37,20 @@ upload_workers: 2
 upload_max_retries: 5
 upload_sweep_interval_sec: 60
 shutdown_upload_timeout_sec: 30
+
+# Minimum severity emitted by the logger: trace, debug, info, notice, warn,
+# error, or critical. JSON logs go to stdout with GCP Cloud Logging's
+# expected "severity" field so they filter/alert correctly in GCP.
+log_level: "info"
+
+# Warn if a recording leg receives zero RTP packets within this many seconds
+# of being negotiated (SBC never sent media). 0 disables the watchdog.
+rtp_no_media_timeout_sec: 5
+
+# Flag (log only, never terminate) any in-progress call older than this with
+# no BYE received — usually means an SBC crashed or dropped the BYE. 0
+# disables the check.
+max_call_duration_hours: 12
+
+# How often the session store is scanned for stale sessions.
+stale_session_check_interval_sec: 300

@@ -33,6 +33,8 @@ type recorderServer struct {
 	// through the proxy or get 404'd by the receiving sipgo mux.
 	sipContactHost string
 	sipContactPort int
+
+	reaperStop chan struct{}
 }
 
 // NewServer constructs the SIP server, registers handlers, and prepares the
@@ -86,6 +88,7 @@ func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, log *slog.
 		mediaIP:        mediaIP,
 		sipContactHost: sipHost,
 		sipContactPort: sipPort,
+		reaperStop:     make(chan struct{}),
 	}
 
 	srv.OnInvite(s.onInvite)
@@ -110,15 +113,59 @@ func (s *recorderServer) Start() error {
 	s.log.Info("SIP signaling listening", "addr", s.cfg.SIPListenAddr, "media_ip", s.mediaIP)
 
 	go func() {
+		defer recoverAndLog(s.log, "ServeUDP")
 		if err := s.srv.ServeUDP(lis); err != nil && !isClosedErr(err) {
 			s.log.Error("SIP UDP serve error", "err", err)
 		}
 	}()
+
+	if s.cfg.MaxCallDurationHours > 0 {
+		go s.staleSessionReaper()
+	}
 	return nil
+}
+
+// staleSessionReaper periodically flags (logs only; never terminates)
+// sessions that have exceeded MaxCallDurationHours without a BYE — most
+// commonly caused by an SBC that crashed or dropped the in-dialog BYE,
+// leaving an open recording file and a leaked session behind.
+func (s *recorderServer) staleSessionReaper() {
+	defer recoverAndLog(s.log, "staleSessionReaper")
+
+	interval := time.Duration(s.cfg.StaleSessionCheckIntervalSec) * time.Second
+	if interval <= 0 {
+		interval = 300 * time.Second
+	}
+	maxAge := time.Duration(s.cfg.MaxCallDurationHours) * time.Hour
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.reaperStop:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			for _, sess := range s.sessions.Snapshot() {
+				age := now.Sub(sess.CreatedAt)
+				if age > maxAge {
+					s.log.Log(context.Background(), LevelCritical,
+						"session exceeded max call duration with no BYE; recording left open (flagged only, not terminated)",
+						"event", eventSessionStale,
+						"sipCallID", sess.CallID,
+						"age_hours", age.Hours(),
+					)
+				}
+			}
+		}
+	}
 }
 
 // Stop closes the SIP listener, finalizes all recordings, and drains uploads.
 func (s *recorderServer) Stop() {
+	close(s.reaperStop)
+
 	if s.srv != nil {
 		_ = s.srv.Close()
 	}
@@ -151,11 +198,12 @@ func (s *recorderServer) Stop() {
 
 // onInvite handles incoming INVITEs, accepting only SIPREC INVITEs.
 func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.ServerTransaction) {
+	defer recoverAndLog(s.log, "onInvite")
 	callID := callIDValue(req)
 	log := s.log.With("sipCallID", callID, "src", req.Source())
 
 	if !IsSiprecInvite(req) {
-		log.Warn("rejecting non-SIPREC INVITE")
+		log.Warn("rejecting non-SIPREC INVITE", "event", eventCallRejected, "reason", "not_siprec")
 		s.respond(tx, req, sip.StatusBadRequest, "Not a SIPREC INVITE", nil)
 		return
 	}
@@ -197,20 +245,24 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 
 	rawSDP, err := ExtractSDPFromSiprecBody(req)
 	if err != nil {
-		log.Error("failed to extract SDP", "err", err)
+		log.Error("failed to extract SDP", "err", err, "event", eventCallRejected, "reason", "sdp_extract_failed")
 		s.respond(tx, req, sip.StatusBadRequest, "Invalid SDP", nil)
 		return
 	}
 
 	session, mediaBlocks, err := ParseSiprecSDP(rawSDP)
 	if err != nil {
-		log.Error("failed to parse SDP", "err", err)
+		log.Error("failed to parse SDP", "err", err, "event", eventCallRejected, "reason", "sdp_parse_failed")
+		// Raw SDP can carry call PII (phone numbers in URIs); only ever
+		// logged at Debug, and only on the failure path where it's needed
+		// to diagnose SBC interop issues.
+		log.Debug("offending SDP body", "sdp", rawSDP)
 		s.respond(tx, req, sip.StatusBadRequest, "Invalid SDP", nil)
 		return
 	}
 	_ = session
 	if len(mediaBlocks) != 2 {
-		log.Warn("SIPREC SDP must have exactly 2 media sections", "count", len(mediaBlocks))
+		log.Warn("SIPREC SDP must have exactly 2 media sections", "count", len(mediaBlocks), "event", eventCallRejected, "reason", "wrong_media_section_count")
 		s.respond(tx, req, sip.StatusBadRequest, "Expected 2 media sections", nil)
 		return
 	}
@@ -222,6 +274,7 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 			meta = parsed
 		} else {
 			log.Warn("failed to parse SIPREC metadata", "err", pErr)
+			log.Debug("offending rs-metadata body", "metadata", rawMeta)
 		}
 	}
 
@@ -256,16 +309,16 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 
 		conn, err := mediartpsdk.ListenUDPEvenPortRange(s.cfg.RTPPortStart, s.cfg.RTPPortEnd, netip.AddrFrom4([4]byte{0, 0, 0, 0}))
 		if err != nil {
-			log.Error("failed to allocate RTP port", "err", err)
+			log.Error("failed to allocate RTP port", "err", err, "event", eventPortExhausted)
 			cleanup()
 			s.respond(tx, req, sip.StatusServiceUnavailable, "No media port", nil)
 			return
 		}
 		port := conn.LocalAddr().(*net.UDPAddr).Port
 
-		rec, err := newRTPRecorder(conn, s.cfg.RecordingDir, callID, dnis, ani, startTimeMs, label, pcmuPT, log)
+		rec, err := newRTPRecorder(conn, s.cfg.RecordingDir, callID, dnis, ani, startTimeMs, label, pcmuPT, s.cfg.RTPNoMediaTimeoutSec, log)
 		if err != nil {
-			log.Error("failed to create recorder", "err", err)
+			log.Error("failed to create recorder", "err", err, "event", eventCallRejected, "reason", "recorder_setup_failed")
 			_ = conn.Close()
 			cleanup()
 			s.respond(tx, req, sip.StatusInternalServerError, "Recording setup failed", nil)
@@ -279,15 +332,20 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 
 	combinedSDP, err := CombineSiprecAnswerSDPs(rawSDP, answers[0], answers[1])
 	if err != nil {
-		log.Error("failed to combine SIPREC answer SDPs", "err", err)
+		log.Error("failed to combine SIPREC answer SDPs", "err", err, "event", eventCallRejected, "reason", "sdp_combine_failed")
 		cleanup()
 		s.respond(tx, req, sip.StatusInternalServerError, "SDP combine failed", nil)
 		return
 	}
 
-	// Start receiving RTP before sending the answer so we don't miss early packets.
+	// Start receiving RTP before sending the answer so we don't miss early
+	// packets. Each leg runs in its own goroutine; recover so a panic in one
+	// call's recording doesn't take down every other in-flight call.
 	for _, rec := range recorders {
-		go rec.run()
+		go func(r *rtpRecorder) {
+			defer recoverAndLog(s.log, "rtp_recorder.run")
+			r.run()
+		}(rec)
 	}
 
 	resp := CreateSiprecResponse(req, combinedSDP, s.sipContactHost, s.sipContactPort)
@@ -313,6 +371,7 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 	s.sessions.Set(callID, sess)
 
 	log.Info("SIPREC recording established",
+		"event", eventCallEstablished,
 		"files", sess.RecordingFiles(),
 		"sip_headers", sess.Headers,
 		"siprec_metadata", sess.Metadata,
@@ -321,6 +380,7 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 
 // onAck completes the dialog handshake; nothing else is required for recording.
 func (s *recorderServer) onAck(_ *slog.Logger, req *sip.Request, _ sip.ServerTransaction) {
+	defer recoverAndLog(s.log, "onAck")
 	callID := callIDValue(req)
 	if s.sessions.Exists(callID) {
 		s.log.Debug("received ACK for SIPREC session", "sipCallID", callID)
@@ -329,6 +389,7 @@ func (s *recorderServer) onAck(_ *slog.Logger, req *sip.Request, _ sip.ServerTra
 
 // onBye terminates a SIPREC session, closes recordings, and publishes call_end.
 func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTransaction) {
+	defer recoverAndLog(s.log, "onBye")
 	endTimeISO := time.Now().UTC().Format(time.RFC3339Nano)
 	callID := callIDValue(req)
 	s.respond(tx, req, sip.StatusOK, "OK", nil)
@@ -349,6 +410,7 @@ func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTr
 	}
 
 	s.log.Info("received BYE for SIPREC session",
+		"event", eventCallEnded,
 		"sipCallID", callID,
 		"sip_headers", sess.Headers,
 		"siprec_metadata", sess.Metadata,
@@ -373,6 +435,7 @@ func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTr
 
 // onOptions answers OPTIONS pings.
 func (s *recorderServer) onOptions(_ *slog.Logger, req *sip.Request, tx sip.ServerTransaction) {
+	defer recoverAndLog(s.log, "onOptions")
 	resp := sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil)
 	resp.AppendHeader(sip.NewHeader("Allow", "INVITE, ACK, BYE, CANCEL, OPTIONS"))
 	resp.AppendHeader(sip.NewHeader("Supported", "siprec"))
