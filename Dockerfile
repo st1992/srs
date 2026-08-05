@@ -32,9 +32,13 @@ RUN apt-get update \
         ca-certificates \
         tzdata \
         sngrep \
+        libcap2-bin \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system siprec \
-    && useradd  --system --gid siprec --home-dir /app --shell /usr/sbin/nologin siprec
+    && useradd  --system --gid siprec --home-dir /app --shell /usr/sbin/nologin siprec \
+    # Container runs as non-root (see USER below), so sngrep needs its capture
+    # capabilities granted directly on the binary via file capabilities.
+    && setcap cap_net_raw,cap_net_admin+eip "$(command -v sngrep)"
 
 WORKDIR /app
 
