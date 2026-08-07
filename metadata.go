@@ -33,12 +33,16 @@ type Group struct {
 }
 
 // CallData carries vendor-extended call identifiers attached to a group.
-// Sonus/Ribbon SBCs populate fromhdr, tohdr, callid, and gcid.
+// Sonus/Ribbon SBCs populate fromhdr, tohdr, dnishdr, callid/incallid,
+// trackingid, and gcid.
 type CallData struct {
-	FromHdr string `xml:"fromhdr" json:"from_hdr,omitempty"`
-	ToHdr   string `xml:"tohdr" json:"to_hdr,omitempty"`
-	CallID  string `xml:"callid" json:"call_id,omitempty"`
-	GCID    string `xml:"gcid" json:"gcid,omitempty"`
+	FromHdr    string `xml:"fromhdr" json:"from_hdr,omitempty"`
+	ToHdr      string `xml:"tohdr" json:"to_hdr,omitempty"`
+	DnisHdr    string `xml:"dnishdr" json:"dnis_hdr,omitempty"`
+	CallID     string `xml:"callid" json:"call_id,omitempty"`
+	IncallID   string `xml:"incallid" json:"incall_id,omitempty"`
+	TrackingID string `xml:"trackingid" json:"tracking_id,omitempty"`
+	GCID       string `xml:"gcid" json:"gcid,omitempty"`
 }
 
 // Session describes a recorded communication session.
@@ -51,10 +55,10 @@ type Session struct {
 
 // Participant describes a party in the recorded session.
 type Participant struct {
-	ParticipantID   string   `xml:"participant_id,attr" json:"participant_id,omitempty"`
-	SessionID       string   `xml:"session_id,attr" json:"session_id,omitempty"`
-	NameIDs         []NameID `xml:"nameID" json:"name_ids,omitempty"`
-	DisassociateTime string  `xml:"disassociate-time" json:"disassociate_time,omitempty"`
+	ParticipantID    string   `xml:"participant_id,attr" json:"participant_id,omitempty"`
+	SessionID        string   `xml:"session_id,attr" json:"session_id,omitempty"`
+	NameIDs          []NameID `xml:"nameID" json:"name_ids,omitempty"`
+	DisassociateTime string   `xml:"disassociate-time" json:"disassociate_time,omitempty"`
 }
 
 // NameID carries the address-of-record and display name for a participant.
