@@ -54,3 +54,20 @@ max_call_duration_hours: 12
 
 # How often the session store is scanned for stale sessions.
 stale_session_check_interval_sec: 300
+
+# Pod-local HTTP API listen address for operational APIs such as the
+# recording-split endpoint (POST /v1/recording/split).
+http_listen_addr: "0.0.0.0:8080"
+
+# IP advertised in Redis as part of "ip:port" for this pod's HTTP API.
+# Leave empty to reuse the same address the SIP Contact header uses.
+api_advertise_ip: ""
+
+# Redis is used to register "loc:<Call-ID>" -> "<api_advertise_ip>:<http port>"
+# for the lifetime of each call, so external systems can look up which
+# recorder pod owns a call and reach its HTTP API directly. Leave
+# redis_addr empty to disable the locator (the recorder still runs; it just
+# won't be discoverable this way).
+redis_addr: ""
+redis_db: 0
+redis_locator_ttl_seconds: 3600

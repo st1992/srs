@@ -48,4 +48,14 @@ data:
     rtp_no_media_timeout_sec:         {{ $root.Values.recorder.config.rtpNoMediaTimeoutSec | default 5 }}
     max_call_duration_hours:          {{ $root.Values.recorder.config.maxCallDurationHours | default 12 }}
     stale_session_check_interval_sec: {{ $root.Values.recorder.config.staleSessionCheckIntervalSec | default 300 }}
+
+    # Pod-local HTTP API (recording-split endpoint). Bound to the node's
+    # network namespace (hostNetwork), so this port is per-instance.
+    http_listen_addr: "0.0.0.0:{{ required (printf "recorder.instances[%d].httpPort is required" $index) $instance.httpPort }}"
+    # Empty defaults to this pod's SIP Contact / node IP.
+    api_advertise_ip: ""
+
+    redis_addr: "{{ $root.Values.recorder.config.redisAddr }}"
+    redis_db: {{ $root.Values.recorder.config.redisDB | default 0 }}
+    redis_locator_ttl_seconds: {{ $root.Values.recorder.config.redisLocatorTTLSeconds | default 3600 }}
 {{ end }}

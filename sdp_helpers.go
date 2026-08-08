@@ -135,6 +135,38 @@ func BuildLegAnswerSDP(mediaIP string, localPort int, pcmuPT uint8, label string
 	return b.String()
 }
 
+// matchLegsToMediaBlocks matches each of a re-INVITE's media blocks, in
+// order, to the existing rtpRecorder leg with the same label (falling back
+// to defaultLabels[i] when a block carries no explicit a=label:, exactly
+// like the original INVITE's leg-creation loop does). The returned slice is
+// positional -- matched[i] is the leg for mediaBlocks[i] -- since
+// CombineSiprecAnswerSDPs pairs answer SDPs with the offer's media blocks by
+// position, not by label.
+//
+// Returns an error naming the offending label if any media block doesn't
+// correspond to an existing leg; callers must NOT reuse any of these legs'
+// sockets/ports for a media session they weren't negotiated for.
+func matchLegsToMediaBlocks(legs []*rtpRecorder, mediaBlocks [][]SDPLine, defaultLabels []string) ([]*rtpRecorder, error) {
+	byLabel := make(map[string]*rtpRecorder, len(legs))
+	for _, leg := range legs {
+		byLabel[leg.label] = leg
+	}
+
+	matched := make([]*rtpRecorder, len(mediaBlocks))
+	for i, mb := range mediaBlocks {
+		label := ExtractSiprecMediaLabel(mb)
+		if label == "" && i < len(defaultLabels) {
+			label = defaultLabels[i]
+		}
+		leg, ok := byLabel[label]
+		if !ok {
+			return nil, fmt.Errorf("no existing recording leg for media label %q", label)
+		}
+		matched[i] = leg
+	}
+	return matched, nil
+}
+
 // BuildCombinedSiprecSDP creates a combined SIPREC SDP from session-level lines
 // and two single-media blocks, ensuring SIPREC-compliant direction/label attributes.
 func BuildCombinedSiprecSDP(session, mediaA, mediaB []SDPLine, labelA, labelB string) string {

@@ -263,3 +263,93 @@ func TestCombineSiprecAnswerSDPs_BadInput(t *testing.T) {
 	_, err := CombineSiprecAnswerSDPs(testSiprecSDP, testSiprecSDP, testSingleMediaSDPOutbound)
 	require.Error(t, err)
 }
+
+// =============================================================================
+// Leg Matching Tests (re-INVITE handling)
+// =============================================================================
+
+func TestMatchLegsToMediaBlocks_MatchesByLabel(t *testing.T) {
+	legs := []*rtpRecorder{
+		closedRecorder("inbound", "/tmp/inbound.ulaw"),
+		closedRecorder("outbound", "/tmp/outbound.ulaw"),
+	}
+	_, mediaBlocks, err := ParseSiprecSDP(testSiprecSDP)
+	require.NoError(t, err)
+	require.Len(t, mediaBlocks, 2)
+
+	matched, err := matchLegsToMediaBlocks(legs, mediaBlocks, []string{"inbound", "outbound"})
+	require.NoError(t, err)
+	require.Len(t, matched, 2)
+	assert.Equal(t, "inbound", matched[0].label)
+	assert.Equal(t, "outbound", matched[1].label)
+}
+
+func TestMatchLegsToMediaBlocks_MatchesReorderedLabels(t *testing.T) {
+	// The re-INVITE lists outbound before inbound; matching must still find
+	// the correct leg for each position by label, not by index.
+	reordered := `v=0
+o=root 1 1 IN IP4 172.18.170.75
+s=Twilio Media Gateway
+c=IN IP4 168.86.139.0
+t=0 0
+m=audio 11248 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=label:outbound
+m=audio 17588 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=label:inbound`
+
+	legs := []*rtpRecorder{
+		closedRecorder("inbound", "/tmp/inbound.ulaw"),
+		closedRecorder("outbound", "/tmp/outbound.ulaw"),
+	}
+	_, mediaBlocks, err := ParseSiprecSDP(reordered)
+	require.NoError(t, err)
+
+	matched, err := matchLegsToMediaBlocks(legs, mediaBlocks, []string{"inbound", "outbound"})
+	require.NoError(t, err)
+	require.Len(t, matched, 2)
+	assert.Equal(t, "outbound", matched[0].label)
+	assert.Equal(t, "inbound", matched[1].label)
+}
+
+func TestMatchLegsToMediaBlocks_FallsBackToDefaultLabels(t *testing.T) {
+	// Media blocks with no a=label: fall back to defaultLabels by position,
+	// matching the original INVITE's leg-creation behavior.
+	noLabels := `v=0
+o=- 1 1 IN IP4 10.0.0.1
+s=test
+c=IN IP4 10.0.0.1
+t=0 0
+m=audio 5000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+m=audio 5002 RTP/AVP 0
+a=rtpmap:0 PCMU/8000`
+
+	legs := []*rtpRecorder{
+		closedRecorder("inbound", "/tmp/inbound.ulaw"),
+		closedRecorder("outbound", "/tmp/outbound.ulaw"),
+	}
+	_, mediaBlocks, err := ParseSiprecSDP(noLabels)
+	require.NoError(t, err)
+
+	matched, err := matchLegsToMediaBlocks(legs, mediaBlocks, []string{"inbound", "outbound"})
+	require.NoError(t, err)
+	assert.Equal(t, "inbound", matched[0].label)
+	assert.Equal(t, "outbound", matched[1].label)
+}
+
+func TestMatchLegsToMediaBlocks_ErrorsOnUnknownLabel(t *testing.T) {
+	legs := []*rtpRecorder{
+		closedRecorder("inbound", "/tmp/inbound.ulaw"),
+		closedRecorder("outbound", "/tmp/outbound.ulaw"),
+	}
+	_, mediaBlocks, err := ParseSiprecSDP(testSiprecSDP) // labels: inbound, outbound
+	require.NoError(t, err)
+
+	// A leg set that doesn't include "outbound" must fail closed rather
+	// than silently reusing some other leg's socket.
+	_, err = matchLegsToMediaBlocks(legs[:1], mediaBlocks, []string{"inbound", "outbound"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outbound")
+}

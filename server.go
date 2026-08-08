@@ -3,17 +3,29 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"time"
 
 	mediartpsdk "github.com/livekit/media-sdk/rtp"
 	"github.com/livekit/sipgo"
 	"github.com/livekit/sipgo/sip"
+)
+
+// locatorOperationTimeout bounds individual Redis calls so a slow/unreachable
+// Redis never blocks SIP signaling handling for long.
+const locatorOperationTimeout = 500 * time.Millisecond
+
+var (
+	errCallNotFound = errors.New("call not found")
+	errCallClosed   = errors.New("call already ended")
 )
 
 // recorderServer is the minimal SIPREC recording SIP server.
@@ -35,11 +47,28 @@ type recorderServer struct {
 	sipContactPort int
 
 	reaperStop chan struct{}
+
+	// locator registers this pod's address in Redis for each active call, so
+	// external systems can discover which pod owns a call and reach its HTTP
+	// API (e.g. to POST /v1/recording/split) directly. locatorEnabled is
+	// false when redis_addr isn't configured; the recorder still runs, it
+	// just isn't discoverable this way.
+	locator        CallLocator
+	locatorEnabled bool
+	apiAdvertiseIP string
+	apiPort        int
+	locatorTTL     time.Duration
+
+	leaseMu     sync.Mutex
+	leases      map[string]struct{}
+	renewerStop chan struct{}
+	renewerDone chan struct{}
+	renewerOnce sync.Once
 }
 
 // NewServer constructs the SIP server, registers handlers, and prepares the
 // RTP port allocator. It does not start listening until Start is called.
-func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, log *slog.Logger) (*recorderServer, error) {
+func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, locator CallLocator, log *slog.Logger) (*recorderServer, error) {
 	mediaIP := cfg.MediaIP
 	if mediaIP == "" {
 		ip, err := detectMediaIP()
@@ -77,6 +106,26 @@ func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, log *slog.
 		sipHost = detected
 	}
 
+	// apiAdvertiseIP is registered in Redis (as "ip:port") so external
+	// systems can reach this pod's HTTP API directly. It defaults to the
+	// same address the SIP Contact header uses.
+	apiAdvertiseIP := cfg.APIAdvertiseIP
+	if apiAdvertiseIP == "" {
+		apiAdvertiseIP = sipHost
+	}
+	_, apiPortStr, err := net.SplitHostPort(cfg.HTTPListenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid http_listen_addr %q: %w", cfg.HTTPListenAddr, err)
+	}
+	apiPort, err := strconv.Atoi(apiPortStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid http_listen_addr port %q: %w", apiPortStr, err)
+	}
+
+	if locator == nil {
+		locator = disabledLocator{reason: "not configured"}
+	}
+
 	s := &recorderServer{
 		cfg:            cfg,
 		log:            log,
@@ -89,12 +138,21 @@ func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, log *slog.
 		sipContactHost: sipHost,
 		sipContactPort: sipPort,
 		reaperStop:     make(chan struct{}),
+		locator:        locator,
+		locatorEnabled: cfg.RedisAddr != "",
+		apiAdvertiseIP: apiAdvertiseIP,
+		apiPort:        apiPort,
+		locatorTTL:     time.Duration(cfg.RedisLocatorTTLSeconds) * time.Second,
+		leases:         make(map[string]struct{}),
+		renewerStop:    make(chan struct{}),
+		renewerDone:    make(chan struct{}),
 	}
 
 	srv.OnInvite(s.onInvite)
 	srv.OnAck(s.onAck)
 	srv.OnBye(s.onBye)
 	srv.OnOptions(s.onOptions)
+	go s.locatorRenewLoop()
 
 	return s, nil
 }
@@ -165,6 +223,7 @@ func (s *recorderServer) staleSessionReaper() {
 // Stop closes the SIP listener, finalizes all recordings, and drains uploads.
 func (s *recorderServer) Stop() {
 	close(s.reaperStop)
+	s.stopLocatorRenewer()
 
 	if s.srv != nil {
 		_ = s.srv.Close()
@@ -175,15 +234,15 @@ func (s *recorderServer) Stop() {
 
 	shutdownTime := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, sess := range s.sessions.DrainAll() {
-		sess.Close()
-		if metaPath, err := s.writeMetadataJSON(sess, shutdownTime, nil); err != nil {
-			s.log.Error("failed to write call metadata JSON on shutdown", "err", err, "sipCallID", sess.CallID)
-		} else {
-			s.metaUploader.Enqueue(metaPath)
+		if s.locatorEnabled {
+			s.stopLocatorRenewal(sess.CallID)
+			locatorCtx, locatorCancel := s.locatorContext()
+			if err := s.locator.Delete(locatorCtx, sess.CallID); err != nil {
+				s.log.Warn("failed to delete call locator on shutdown", "err", err, "sipCallID", sess.CallID)
+			}
+			locatorCancel()
 		}
-		for _, p := range sess.RecordingFiles() {
-			s.uploader.Enqueue(p)
-		}
+		s.finalizeSession(sess, shutdownTime, nil, "shutdown")
 	}
 
 	timeout := time.Duration(s.cfg.ShutdownUploadTimeoutSec) * time.Second
@@ -213,8 +272,13 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 		return
 	}
 
-	if s.sessions.Exists(callID) {
-		log.Debug("ignoring SIPREC INVITE retransmission")
+	// A true SIP-level retransmission (identical branch) is already matched
+	// and absorbed by sipgo's transaction layer before onInvite is ever
+	// called again -- anything that reaches here for a Call-ID we already
+	// have a session for is a genuinely distinct transaction (a re-INVITE),
+	// not network noise, and must get a real response.
+	if sess, ok := s.sessions.Get(callID); ok {
+		s.onReInvite(log, req, tx, sess)
 		return
 	}
 
@@ -338,6 +402,35 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 		return
 	}
 
+	// Register this pod's address in Redis so external systems can discover
+	// it and reach the recording-split API directly for this call. Skipped
+	// entirely (not treated as an error) when Redis isn't configured.
+	locatorRegistered := false
+	cleanupLocator := func() {
+		if !locatorRegistered {
+			return
+		}
+		locatorCtx, locatorCancel := s.locatorContext()
+		if err := s.locator.Delete(locatorCtx, callID); err != nil {
+			log.Warn("failed to delete call locator during cleanup", "err", err)
+		}
+		locatorCancel()
+		locatorRegistered = false
+	}
+	if s.locatorEnabled {
+		locatorValue := net.JoinHostPort(s.apiAdvertiseIP, strconv.Itoa(s.apiPort))
+		locatorCtx, locatorCancel := s.locatorContext()
+		err = s.locator.Register(locatorCtx, callID, locatorValue, s.locatorTTL)
+		locatorCancel()
+		if err != nil {
+			log.Error("failed to register call locator", "err", err, "event", eventLocatorRegisterFailed)
+			cleanup()
+			s.respond(tx, req, sip.StatusServiceUnavailable, "Call locator unavailable", nil)
+			return
+		}
+		locatorRegistered = true
+	}
+
 	// Start receiving RTP before sending the answer so we don't miss early
 	// packets. Each leg runs in its own goroutine; recover so a panic in one
 	// call's recording doesn't take down every other in-flight call.
@@ -352,23 +445,29 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 	if err := tx.Respond(resp); err != nil {
 		log.Error("failed to send SIPREC 200 OK", "err", err)
 		cleanup()
+		cleanupLocator()
 		return
 	}
 
 	sess := &recSession{
-		CallID:    callID,
-		SourceIP:  sourceAddr(req),
-		From:      fromURI(req),
-		To:        toURI(req),
-		DNIS:      dnis,
-		ANI:       ani,
-		Headers:   collectSIPHeaders(req),
-		Metadata:  meta,
-		Legs:      recorders,
-		StartTime: startTimeISO,
-		CreatedAt: startTime,
+		CallID:             callID,
+		SourceIP:           sourceAddr(req),
+		From:               fromURI(req),
+		To:                 toURI(req),
+		DNIS:               dnis,
+		ANI:                ani,
+		Headers:            collectSIPHeaders(req),
+		Metadata:           meta,
+		Legs:               recorders,
+		StartTime:          startTimeISO,
+		CreatedAt:          startTime,
+		lastSegmentStartMs: startTimeMs,
 	}
+	sess.beginRecordingSegmentLocked(startTime)
 	s.sessions.Set(callID, sess)
+	if locatorRegistered {
+		s.startLocatorRenewal(callID)
+	}
 
 	log.Info("SIPREC recording established",
 		"event", eventCallEstablished,
@@ -376,6 +475,88 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 		"sip_headers", sess.Headers,
 		"siprec_metadata", sess.Metadata,
 	)
+}
+
+// onReInvite handles a second (or subsequent) INVITE for a Call-ID we
+// already have an active recording session for. Per confirmed SBC behavior,
+// these always renegotiate with the SAME SDP/media (IP/port/codec) as the
+// original INVITE -- this is the same underlying media session, not a
+// renegotiation -- so the existing RTP sockets/legs are left completely
+// untouched: we just re-answer within the same media parameters and rotate
+// the recording segment (close current .ulaw files + metadata JSON, open
+// new ones), exactly like the POST /v1/recording/split API does.
+func (s *recorderServer) onReInvite(log *slog.Logger, req *sip.Request, tx sip.ServerTransaction, sess *recSession) {
+	log.Info("processing re-INVITE for existing SIPREC session")
+	s.respond(tx, req, sip.StatusTrying, "Trying", nil)
+
+	rawSDP, err := ExtractSDPFromSiprecBody(req)
+	if err != nil {
+		log.Error("failed to extract SDP from re-INVITE", "err", err, "event", eventCallRejected, "reason", "sdp_extract_failed")
+		s.respond(tx, req, sip.StatusBadRequest, "Invalid SDP", nil)
+		return
+	}
+
+	_, mediaBlocks, err := ParseSiprecSDP(rawSDP)
+	if err != nil {
+		log.Error("failed to parse re-INVITE SDP", "err", err, "event", eventCallRejected, "reason", "sdp_parse_failed")
+		s.respond(tx, req, sip.StatusBadRequest, "Invalid SDP", nil)
+		return
+	}
+	if len(mediaBlocks) != 2 {
+		log.Warn("re-INVITE SIPREC SDP must have exactly 2 media sections", "count", len(mediaBlocks), "event", eventCallRejected, "reason", "wrong_media_section_count")
+		s.respond(tx, req, sip.StatusBadRequest, "Expected 2 media sections", nil)
+		return
+	}
+
+	defaultLabels := []string{"inbound", "outbound"}
+	legs, err := matchLegsToMediaBlocks(sess.Legs, mediaBlocks, defaultLabels)
+	if err != nil {
+		// The re-INVITE wants media parameters this session was never
+		// negotiated for. Reject rather than silently reusing the wrong
+		// leg's socket -- doing so would misroute or drop audio.
+		log.Error("re-INVITE media does not match existing recording legs", "err", err, "event", eventCallRejected, "reason", "reinvite_leg_mismatch")
+		s.respond(tx, req, sip.StatusNotAcceptableHere, "Media does not match existing session", nil)
+		return
+	}
+
+	answers := make([]string, len(legs))
+	for i, leg := range legs {
+		port := leg.conn.LocalAddr().(*net.UDPAddr).Port
+		answers[i] = BuildLegAnswerSDP(s.mediaIP, port, leg.pcmuPT, leg.label)
+	}
+
+	combinedSDP, err := CombineSiprecAnswerSDPs(rawSDP, answers[0], answers[1])
+	if err != nil {
+		log.Error("failed to combine re-INVITE answer SDPs", "err", err, "event", eventCallRejected, "reason", "sdp_combine_failed")
+		s.respond(tx, req, sip.StatusInternalServerError, "SDP combine failed", nil)
+		return
+	}
+
+	// Parse rs-metadata from this INVITE (best effort; attached to the
+	// segment it closes out below, symmetric with how a BYE's rs-metadata
+	// is attached to the segment it closes).
+	var reinviteMeta *SiprecMetadata
+	if rawMeta, mErr := ExtractSiprecMetadata(req); mErr == nil {
+		if parsed, pErr := ParseSiprecMetadata(rawMeta); pErr == nil {
+			reinviteMeta = parsed
+		} else {
+			log.Warn("failed to parse re-INVITE SIPREC metadata", "err", pErr)
+		}
+	}
+
+	resp := CreateSiprecResponse(req, combinedSDP, s.sipContactHost, s.sipContactPort)
+	if err := tx.Respond(resp); err != nil {
+		log.Error("failed to send re-INVITE 200 OK", "err", err)
+		return
+	}
+
+	// Only rotate the segment after the far end has been told the
+	// re-INVITE succeeded. A failure here is non-fatal to the call:
+	// rotateSegment never partially mutates state, so on failure the call
+	// simply keeps recording into its current segment.
+	if _, err := s.rotateSegment(sess, time.Now().UTC(), "reinvite", nil, reinviteMeta); err != nil {
+		log.Error("failed to rotate recording segment for re-INVITE", "err", err, "event", eventSegmentSplitFailed)
+	}
 }
 
 // onAck completes the dialog handshake; nothing else is required for recording.
@@ -399,6 +580,15 @@ func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTr
 		return
 	}
 
+	if s.locatorEnabled {
+		s.stopLocatorRenewal(callID)
+		locatorCtx, locatorCancel := s.locatorContext()
+		if err := s.locator.Delete(locatorCtx, callID); err != nil {
+			s.log.Warn("failed to delete call locator", "err", err, "sipCallID", callID)
+		}
+		locatorCancel()
+	}
+
 	// Parse rs-metadata from the BYE body (best effort; carries disassociate-time).
 	var byeMeta *SiprecMetadata
 	if rawMeta, mErr := ExtractSiprecMetadata(req); mErr == nil {
@@ -416,21 +606,10 @@ func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTr
 		"siprec_metadata", sess.Metadata,
 		"bye_metadata", byeMeta,
 	)
-	sess.Close()
 
-	// Write per-call metadata JSON and enqueue it for upload to the metadata
-	// bucket. Errors are non-fatal; audio recording upload still proceeds.
-	if metaPath, err := s.writeMetadataJSON(sess, endTimeISO, byeMeta); err != nil {
-		s.log.Error("failed to write call metadata JSON", "err", err, "sipCallID", callID)
-	} else {
-		s.metaUploader.Enqueue(metaPath)
-		s.log.Info("enqueued call metadata JSON for upload", "file", metaPath)
-	}
-
-	// Recording files are now closed; upload them (and delete locally on success).
-	for _, p := range sess.RecordingFiles() {
-		s.uploader.Enqueue(p)
-	}
+	// Closes out the current segment, writes/enqueues its metadata JSON, and
+	// enqueues its recording files for upload.
+	s.finalizeSession(sess, endTimeISO, byeMeta, "bye")
 }
 
 // onOptions answers OPTIONS pings.
@@ -453,6 +632,221 @@ func (s *recorderServer) respond(tx sip.ServerTransaction, req *sip.Request, cod
 }
 
 // =============================================================================
+// Recording split
+// =============================================================================
+
+// splitResult summarizes the outcome of a SplitRecording call: the segment
+// that was just closed out, and the new one that continues the recording.
+type splitResult struct {
+	CallID            string
+	ClosedSegment     *callSegment
+	NewSegmentSeq     int
+	NewRecordingFiles map[string]string
+}
+
+// SplitRecording closes out the call's current recording segment (its
+// .ulaw files + metadata JSON) and starts a new one, without dropping any
+// in-flight RTP. metadata is attached to the new segment going forward; the
+// SIPREC rs-metadata captured at INVITE time stays associated with every
+// segment via callMetadataRecord.InviteMetadata.
+func (s *recorderServer) SplitRecording(ctx context.Context, callID string, metadata map[string]any) (*splitResult, error) {
+	sess, ok := s.sessions.Get(callID)
+	if !ok {
+		return nil, errCallNotFound
+	}
+	return s.rotateSegment(sess, time.Now().UTC(), "api_split", metadata, nil)
+}
+
+// rotateSegment closes out sess's current recording segment (its .ulaw
+// files + metadata JSON) and starts a new one, without dropping any
+// in-flight RTP. It is the shared core behind both the HTTP split API
+// (SplitRecording) and a mid-call re-INVITE on an existing Call-ID
+// (onReInvite), which are otherwise identical except for what triggered the
+// rotation and where the caller-supplied metadata comes from.
+//
+// requestMetadata is attached to the NEW segment going forward (e.g. the
+// split API caller's metadata dict). closedSegmentMeta, if non-nil, is
+// attached to the JSON record of the segment being CLOSED -- e.g. the
+// rs-metadata carried by the re-INVITE that triggered this rotation,
+// symmetric with how finalizeSession attaches byeMeta to the segment it
+// closes.
+func (s *recorderServer) rotateSegment(sess *recSession, now time.Time, reason string, requestMetadata map[string]any, closedSegmentMeta *SiprecMetadata) (*splitResult, error) {
+	newSinks := make(map[string]*fileSink, len(sess.Legs))
+
+	sess.mu.Lock()
+	if sess.closed {
+		sess.mu.Unlock()
+		return nil, errCallClosed
+	}
+
+	startMs := sess.nextSegmentStartMsLocked(now)
+	for _, leg := range sess.Legs {
+		sink, err := newFileSink(s.cfg.RecordingDir, sess.CallID, sess.DNIS, sess.ANI, startMs, leg.label)
+		if err != nil {
+			sess.mu.Unlock()
+			for _, created := range newSinks {
+				_ = created.Close()
+			}
+			return nil, fmt.Errorf("create new recording sink for label %s: %w", leg.label, err)
+		}
+		newSinks[leg.label] = sink
+	}
+
+	var oldSinks []rtpSink
+	for _, leg := range sess.Legs {
+		oldSinks = append(oldSinks, leg.ReplaceSink(newSinks[leg.label]))
+	}
+
+	completed := sess.completeCurrentSegmentLocked(now, reason)
+	sess.beginRecordingSegmentLocked(now)
+	sess.CurrentSegment.RequestMetadata = requestMetadata
+	newSeq := sess.CurrentSegment.Sequence
+	newFiles := sess.CurrentSegment.RecordingFiles
+	sess.mu.Unlock()
+
+	for _, sink := range oldSinks {
+		if sink == nil {
+			continue
+		}
+		if err := sink.Close(); err != nil {
+			s.log.Error("failed to close pre-split recording sink", "err", err, "sipCallID", sess.CallID, "file", sink.Path())
+		}
+		if p := sink.Path(); p != "" {
+			s.uploader.Enqueue(p)
+		}
+	}
+	for _, sink := range newSinks {
+		s.uploader.MarkActive(sink.Path())
+	}
+
+	if completed != nil {
+		if metaPath, err := s.writeSegmentMetadataJSON(sess, completed, nil, closedSegmentMeta); err != nil {
+			s.log.Error("failed to write pre-split metadata JSON", "err", err, "sipCallID", sess.CallID, "event", eventSegmentSplitFailed)
+		} else {
+			s.metaUploader.Enqueue(metaPath)
+		}
+	}
+
+	s.log.Info("split call recording into a new segment",
+		"event", eventSegmentSplit,
+		"sipCallID", sess.CallID,
+		"reason", reason,
+		"closed_segment", completed,
+		"new_segment_sequence", newSeq,
+		"new_recording_files", newFiles,
+	)
+
+	return &splitResult{
+		CallID:            sess.CallID,
+		ClosedSegment:     completed,
+		NewSegmentSeq:     newSeq,
+		NewRecordingFiles: newFiles,
+	}, nil
+}
+
+// finalizeSession closes out the call's current (and final) segment,
+// writes/enqueues its metadata JSON, and enqueues its recording files for
+// upload. Used by both onBye and Stop (shutdown).
+func (s *recorderServer) finalizeSession(sess *recSession, endTimeISO string, byeMeta *SiprecMetadata, reason string) {
+	endTime, err := time.Parse(time.RFC3339Nano, endTimeISO)
+	if err != nil {
+		endTime = time.Now().UTC()
+	}
+
+	completed, legs := sess.finalize(endTime, reason)
+	for _, leg := range legs {
+		leg.Close()
+	}
+
+	if completed == nil {
+		return
+	}
+	if metaPath, err := s.writeSegmentMetadataJSON(sess, completed, byeMeta, nil); err != nil {
+		s.log.Error("failed to write call metadata JSON", "err", err, "sipCallID", sess.CallID)
+	} else {
+		s.metaUploader.Enqueue(metaPath)
+		s.log.Info("enqueued call metadata JSON for upload", "file", metaPath)
+	}
+	for _, p := range completed.RecordingFiles {
+		s.uploader.Enqueue(p)
+	}
+}
+
+// =============================================================================
+// Call locator (Redis)
+// =============================================================================
+
+func (s *recorderServer) locatorContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), locatorOperationTimeout)
+}
+
+func (s *recorderServer) startLocatorRenewal(callID string) {
+	s.leaseMu.Lock()
+	s.leases[callID] = struct{}{}
+	s.leaseMu.Unlock()
+}
+
+func (s *recorderServer) stopLocatorRenewal(callID string) {
+	s.leaseMu.Lock()
+	delete(s.leases, callID)
+	s.leaseMu.Unlock()
+}
+
+// locatorRenewLoop periodically renews the Redis TTL for every active call
+// locator lease so Redis doesn't expire the entry out from under a
+// still-active call.
+func (s *recorderServer) locatorRenewLoop() {
+	defer close(s.renewerDone)
+	ttl := s.locatorTTL
+	if ttl <= 0 {
+		return
+	}
+	interval := ttl / 2
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.renewerStop:
+			return
+		case <-ticker.C:
+			callIDs := s.activeLocatorCallIDs()
+			if len(callIDs) == 0 {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), locatorOperationTimeout)
+			err := s.locator.RenewMany(ctx, callIDs, ttl)
+			cancel()
+			if err != nil {
+				s.log.Warn("failed to renew call locators", "err", err, "count", len(callIDs))
+			}
+		}
+	}
+}
+
+func (s *recorderServer) activeLocatorCallIDs() []string {
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	callIDs := make([]string, 0, len(s.leases))
+	for callID := range s.leases {
+		callIDs = append(callIDs, callID)
+	}
+	return callIDs
+}
+
+func (s *recorderServer) stopLocatorRenewer() {
+	if s.renewerStop == nil {
+		return
+	}
+	s.renewerOnce.Do(func() {
+		close(s.renewerStop)
+		<-s.renewerDone
+	})
+}
+
+// =============================================================================
 // Metadata JSON
 // =============================================================================
 
@@ -460,34 +854,42 @@ func (s *recorderServer) respond(tx sip.ServerTransaction, req *sip.Request, cod
 // captures everything known at both INVITE and BYE time so that downstream
 // consumers have a single, self-contained document per call.
 type callMetadataRecord struct {
-	SIPCallID      string            `json:"sip_call_id"`
-	From           string            `json:"from,omitempty"`
-	To             string            `json:"to,omitempty"`
-	SourceIP       string            `json:"source_ip,omitempty"`
-	StartTime      string            `json:"start_time,omitempty"`
-	EndTime        string            `json:"end_time,omitempty"`
-	RecordingFiles map[string]string `json:"recording_files,omitempty"`
-	SIPHeaders     map[string]string `json:"sip_headers,omitempty"`
-	InviteMetadata *SiprecMetadata   `json:"invite_metadata,omitempty"`
-	ByeMetadata    *SiprecMetadata   `json:"bye_metadata,omitempty"`
+	SIPCallID        string            `json:"sip_call_id"`
+	From             string            `json:"from,omitempty"`
+	To               string            `json:"to,omitempty"`
+	SourceIP         string            `json:"source_ip,omitempty"`
+	StartTime        string            `json:"start_time,omitempty"`
+	EndTime          string            `json:"end_time,omitempty"`
+	RecordingFiles   map[string]string `json:"recording_files,omitempty"`
+	SIPHeaders       map[string]string `json:"sip_headers,omitempty"`
+	InviteMetadata   *SiprecMetadata   `json:"invite_metadata,omitempty"`
+	ByeMetadata      *SiprecMetadata   `json:"bye_metadata,omitempty"`
+	ReinviteMetadata *SiprecMetadata   `json:"reinvite_metadata,omitempty"`
+	Segment          *callSegment      `json:"segment,omitempty"`
 }
 
-// writeMetadataJSON serialises call metadata to a JSON file in the recording
-// directory and returns its path. The filename shares the same stem as the
-// recording files: {callID}-{dnis}-{ani}-{startTimeMs}.json, so the JSON and
-// its matching .ulaw files can always be correlated by dropping the suffix.
-func (s *recorderServer) writeMetadataJSON(sess *recSession, endTimeISO string, byeMeta *SiprecMetadata) (string, error) {
+// writeSegmentMetadataJSON serialises a single completed recording segment
+// to a JSON file in the recording directory and returns its path. The
+// filename shares the same stem as that segment's recording files:
+// {callID}-{dnis}-{ani}-{createdAtMs}-seg{NNN}.json, so the JSON and its
+// matching .ulaw files can always be correlated.
+func (s *recorderServer) writeSegmentMetadataJSON(sess *recSession, seg *callSegment, byeMeta *SiprecMetadata, reinviteMeta *SiprecMetadata) (string, error) {
+	if seg == nil {
+		return "", fmt.Errorf("missing metadata segment")
+	}
 	record := &callMetadataRecord{
-		SIPCallID:      sess.CallID,
-		From:           sess.From,
-		To:             sess.To,
-		SourceIP:       sess.SourceIP,
-		StartTime:      sess.StartTime,
-		EndTime:        endTimeISO,
-		RecordingFiles: sess.RecordingFiles(),
-		SIPHeaders:     sess.Headers,
-		InviteMetadata: sess.Metadata,
-		ByeMetadata:    byeMeta,
+		SIPCallID:        sess.CallID,
+		From:             sess.From,
+		To:               sess.To,
+		SourceIP:         sess.SourceIP,
+		StartTime:        seg.StartTime,
+		EndTime:          seg.EndTime,
+		RecordingFiles:   seg.RecordingFiles,
+		SIPHeaders:       sess.Headers,
+		InviteMetadata:   sess.Metadata,
+		ByeMetadata:      byeMeta,
+		ReinviteMetadata: reinviteMeta,
+		Segment:          seg,
 	}
 
 	data, err := json.MarshalIndent(record, "", "  ")
@@ -495,11 +897,12 @@ func (s *recorderServer) writeMetadataJSON(sess *recSession, endTimeISO string, 
 		return "", fmt.Errorf("marshal metadata: %w", err)
 	}
 
-	name := fmt.Sprintf("%s-%s-%s-%d.json",
+	name := fmt.Sprintf("%s-%s-%s-%d-seg%03d.json",
 		sanitizeFileComponent(sess.CallID),
 		sanitizeFileComponent(sess.DNIS),
 		sanitizeFileComponent(sess.ANI),
 		sess.CreatedAt.UnixMilli(),
+		seg.Sequence,
 	)
 	p := filepath.Join(s.cfg.RecordingDir, name)
 	if err := os.WriteFile(p, data, 0o644); err != nil {

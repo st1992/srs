@@ -15,7 +15,10 @@
 {{- end }}
 {{- $allPortsTriggers := untilStep $rtpPortStart (int (add $rtpPortStart 10)) 2 }}
 {{- $instanceNames := dict }}
-{{- $sipPorts := dict }}
+{{/* Host-network pods are co-located on the same node (coLocateOnSameNode),
+     so sipPort and httpPort must all be mutually exclusive across every
+     instance -- they share one host port space. */}}
+{{- $usedPorts := dict }}
 {{- range $index, $instance := $root.Values.recorder.instances }}
 {{- $instanceName := include "recorder.instanceName" $instance }}
 {{- if hasKey $instanceNames $instanceName }}
@@ -30,10 +33,22 @@
 {{- fail (printf "recorder.instances[%d].sipPort must be outside the RTP range" $index) }}
 {{- end }}
 {{- $sipPortKey := printf "%d" $sipPort }}
-{{- if hasKey $sipPorts $sipPortKey }}
+{{- if hasKey $usedPorts $sipPortKey }}
 {{- fail (printf "recorder.instances[%d].sipPort %d is already used by another host-network recorder" $index $sipPort) }}
 {{- end }}
-{{- $_ := set $sipPorts $sipPortKey true }}
+{{- $_ := set $usedPorts $sipPortKey true }}
+{{- $httpPort := int (required (printf "recorder.instances[%d].httpPort is required" $index) $instance.httpPort) }}
+{{- if or (le $httpPort 0) (gt $httpPort 65535) }}
+{{- fail (printf "recorder.instances[%d].httpPort must be within 1-65535" $index) }}
+{{- end }}
+{{- if and (ge $httpPort $rtpPortStart) (le $httpPort $rtpPortEnd) }}
+{{- fail (printf "recorder.instances[%d].httpPort must be outside the RTP range" $index) }}
+{{- end }}
+{{- $httpPortKey := printf "%d" $httpPort }}
+{{- if hasKey $usedPorts $httpPortKey }}
+{{- fail (printf "recorder.instances[%d].httpPort %d is already used by another host-network recorder" $index $httpPort) }}
+{{- end }}
+{{- $_ := set $usedPorts $httpPortKey true }}
 {{- end }}
 {{ range $index, $instance := $root.Values.recorder.instances }}
 {{ $instanceCtx := dict "root" $root "instance" $instance }}

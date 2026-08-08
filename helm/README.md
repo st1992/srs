@@ -97,9 +97,11 @@ recorder:
     - name: recorder-1
       loadBalancerIP: "100.73.16.5"
       sipPort: 5060
+      httpPort: 8080
     - name: recorder-2
       loadBalancerIP: "100.73.16.64"
       sipPort: 5061
+      httpPort: 8081
       persistence:
         size: 50Gi
 
@@ -143,6 +145,36 @@ recorder:
 Leave `loadBalancerClass` empty on older clusters; the
 `networking.gke.io/load-balancer-type: Internal` annotation is enabled by
 default.
+
+## Recording-split API (optional)
+
+Each recorder pod exposes a pod-local HTTP API (`instances[].httpPort`,
+default `8080`/`8081`) with `POST /v1/recording/split`: given a `call_id`
+and a `metadata` object, it closes out the call's current recording
+segment (its `.ulaw` files + metadata JSON) and starts a new one tagged
+with that metadata, without dropping any RTP.
+
+To let an external system discover which pod owns a given call and reach
+this API directly (bypassing the SIP LoadBalancer, since hostNetwork pods
+answer on the node IP, not the shared VIP), configure a reachable Redis:
+
+```yaml
+recorder:
+  config:
+    redisAddr: "10.20.0.50:6379"
+    redisDB: 0
+    redisLocatorTTLSeconds: 3600
+```
+
+While a call is active, the owning pod registers `loc:<Call-ID>` ->
+`<node-ip>:<httpPort>` in Redis and keeps it renewed; the external system
+reads that key and calls the split API on that address directly. Leaving
+`redisAddr` empty disables this discovery mechanism — the recorder still
+runs and records normally, it just isn't discoverable this way.
+
+`instances[].httpPort` must be unique per instance (validated at template
+time) since co-located recorder pods share the node's network namespace,
+just like `sipPort`.
 
 ## Host-network RTP routing
 

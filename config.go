@@ -81,6 +81,24 @@ type Config struct {
 	// StaleSessionCheckIntervalSec controls how often the session store is
 	// scanned for stale sessions. Defaults to 300 seconds.
 	StaleSessionCheckIntervalSec int `yaml:"stale_session_check_interval_sec"`
+
+	// HTTPListenAddr is the pod-local HTTP API listen address for operational
+	// APIs such as the recording-split endpoint.
+	HTTPListenAddr string `yaml:"http_listen_addr"`
+
+	// APIAdvertiseIP is the IP stored in Redis loc:<Call-ID> (as "ip:port").
+	// If empty, the recorder uses the same non-loopback address detection as
+	// the SIP Contact header.
+	APIAdvertiseIP string `yaml:"api_advertise_ip"`
+
+	// Redis settings used for call-location registration, so external
+	// systems can discover which recorder pod owns a given call and reach
+	// its HTTP API directly. Redis is expected to be reachable on a private
+	// IP/plain TCP port with no TLS and no AUTH. If RedisAddr is empty, the
+	// locator is disabled and the recorder runs without it.
+	RedisAddr              string `yaml:"redis_addr"`
+	RedisDB                int    `yaml:"redis_db"`
+	RedisLocatorTTLSeconds int    `yaml:"redis_locator_ttl_seconds"`
 }
 
 // DefaultConfig returns a Config populated with sensible defaults.
@@ -101,6 +119,8 @@ func DefaultConfig() Config {
 		RTPNoMediaTimeoutSec:         5,
 		MaxCallDurationHours:         12,
 		StaleSessionCheckIntervalSec: 300,
+		HTTPListenAddr:               "0.0.0.0:8080",
+		RedisLocatorTTLSeconds:       3600,
 	}
 }
 
@@ -141,6 +161,12 @@ func (c *Config) Validate() error {
 	}
 	if _, err := parseLogLevel(c.LogLevel); err != nil {
 		return err
+	}
+	if c.HTTPListenAddr == "" {
+		return fmt.Errorf("http_listen_addr must be set")
+	}
+	if c.RedisLocatorTTLSeconds <= 0 {
+		return fmt.Errorf("redis_locator_ttl_seconds must be positive")
 	}
 	return nil
 }

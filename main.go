@@ -90,7 +90,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv, err := NewServer(cfg, uploader, metaUploader, log)
+	locator, err := NewCallLocator(ctx, cfg, log)
+	if err != nil {
+		log.Error("failed to initialize call locator", "err", err)
+		os.Exit(1)
+	}
+	defer locator.Close()
+
+	srv, err := NewServer(cfg, uploader, metaUploader, locator, log)
 	if err != nil {
 		log.Error("failed to create SIPREC server", "err", err)
 		os.Exit(1)
@@ -101,6 +108,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	apiSrv := NewAPIServer(cfg, srv, log)
+	apiSrv.Start()
+
 	log.Info("siprec-recorder started")
 
 	sig := make(chan os.Signal, 1)
@@ -108,5 +118,12 @@ func main() {
 	<-sig
 
 	log.Info("shutting down")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := apiSrv.Stop(shutdownCtx); err != nil {
+		log.Error("failed to shut down HTTP API server", "err", err)
+	}
+	shutdownCancel()
+
 	srv.Stop()
 }

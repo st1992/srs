@@ -184,6 +184,52 @@ func TestRTPRecorder_NoMediaWatchdog_SilentWhenPacketsReceived(t *testing.T) {
 	assert.NotContains(t, buf.String(), eventNoRTPReceived)
 }
 
+func TestRTPRecorder_ReplaceSink(t *testing.T) {
+	dir := t.TempDir()
+
+	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	require.NoError(t, err)
+	serverAddr := srvConn.LocalAddr().(*net.UDPAddr)
+
+	const pcmuPT = uint8(0)
+	rec, err := newRTPRecorder(srvConn, dir, "callSplit", "1", "2", time.Now().UnixMilli(), "inbound", pcmuPT, 0, testLogger())
+	require.NoError(t, err)
+
+	go rec.run()
+
+	client, err := net.DialUDP("udp", nil, serverAddr)
+	require.NoError(t, err)
+	defer client.Close()
+
+	_, err = client.Write(rtpPacket(pcmuPT, 1, []byte("first")))
+	require.NoError(t, err)
+	time.Sleep(100 * time.Millisecond)
+
+	oldPath := rec.Path()
+	newSink, err := newFileSink(dir, "callSplit", "1", "2", time.Now().UnixMilli(), "inbound")
+	require.NoError(t, err)
+
+	old := rec.ReplaceSink(newSink)
+	require.NotNil(t, old)
+	require.NoError(t, old.Close())
+
+	assert.NotEqual(t, oldPath, rec.Path())
+	assert.Equal(t, newSink.Path(), rec.Path())
+
+	_, err = client.Write(rtpPacket(pcmuPT, 2, []byte("second")))
+	require.NoError(t, err)
+	time.Sleep(200 * time.Millisecond)
+	rec.Close()
+
+	oldData, err := os.ReadFile(oldPath)
+	require.NoError(t, err)
+	assert.Equal(t, "first", string(oldData))
+
+	newData, err := os.ReadFile(newSink.Path())
+	require.NoError(t, err)
+	assert.Equal(t, "second", string(newData))
+}
+
 func TestSanitizeFileComponent(t *testing.T) {
 	assert.Equal(t, "a_b_c", sanitizeFileComponent("a/b:c"))
 	assert.Equal(t, "unknown", sanitizeFileComponent(""))

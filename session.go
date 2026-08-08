@@ -5,6 +5,18 @@ import (
 	"time"
 )
 
+// callSegment describes one continuous slice of a call's recording, from
+// when it started (call setup, or an API-triggered split) until it ended
+// (another split, or the call's BYE/shutdown).
+type callSegment struct {
+	Sequence        int               `json:"sequence"`
+	StartTime       string            `json:"start_time"`
+	EndTime         string            `json:"end_time,omitempty"`
+	RecordingFiles  map[string]string `json:"recording_files,omitempty"`
+	RequestMetadata map[string]any    `json:"request_metadata,omitempty"`
+	StopReason      string            `json:"stop_reason,omitempty"`
+}
+
 // recSession tracks a single SIPREC recording call and its two media legs.
 type recSession struct {
 	// CallID is the original SIP Call-ID.
@@ -34,17 +46,117 @@ type recSession struct {
 
 	CreatedAt time.Time
 
+	// lastSegmentStartMs is the Unix-millisecond timestamp last used to name
+	// a segment's recording files, seeded from the call's own start time.
+	// nextSegmentStartMsLocked uses it to guarantee every segment gets a
+	// strictly increasing timestamp even if two segments start within the
+	// same millisecond (e.g. a split requested immediately after the call
+	// begins) — otherwise a same-millisecond split would reuse the exact
+	// filename of the still-open previous segment and os.Create would
+	// truncate it out from under the open file handle.
+	lastSegmentStartMs int64
+
+	// SegmentSeq is the sequence number to assign to the next segment.
+	SegmentSeq int
+	// CurrentSegment is the in-progress recording segment, or nil if the
+	// call hasn't started its first segment yet.
+	CurrentSegment *callSegment
+	// CompletedSegments holds every segment that has been closed out, in
+	// order, via completeCurrentSegmentLocked.
+	CompletedSegments []*callSegment
+
 	mu     sync.Mutex
 	closed bool
 }
 
-// RecordingFiles returns a map of leg label -> recording file path.
+// RecordingFiles returns a map of leg label -> recording file path. If a
+// segment is in progress, its recording file paths are returned; otherwise
+// the legs' current paths are used directly.
 func (s *recSession) RecordingFiles() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.CurrentSegment != nil && len(s.CurrentSegment.RecordingFiles) > 0 {
+		files := make(map[string]string, len(s.CurrentSegment.RecordingFiles))
+		for label, p := range s.CurrentSegment.RecordingFiles {
+			files[label] = p
+		}
+		return files
+	}
+	return s.recordingFilesLocked()
+}
+
+func (s *recSession) recordingFilesLocked() map[string]string {
 	files := make(map[string]string, len(s.Legs))
 	for _, leg := range s.Legs {
 		files[leg.label] = leg.Path()
 	}
 	return files
+}
+
+// beginRecordingSegmentLocked opens a new current segment starting at start,
+// seeded with the legs' current recording file paths. Callers must hold s.mu.
+func (s *recSession) beginRecordingSegmentLocked(start time.Time) {
+	s.CurrentSegment = &callSegment{
+		Sequence:       s.SegmentSeq,
+		StartTime:      start.UTC().Format(time.RFC3339Nano),
+		RecordingFiles: s.recordingFilesLocked(),
+	}
+	s.SegmentSeq++
+}
+
+// nextSegmentStartMsLocked returns a Unix-millisecond timestamp for naming a
+// new segment's recording files, guaranteed to be strictly greater than the
+// one used by the previous segment (see lastSegmentStartMs). Callers must
+// hold s.mu.
+func (s *recSession) nextSegmentStartMsLocked(now time.Time) int64 {
+	ms := now.UnixMilli()
+	if ms <= s.lastSegmentStartMs {
+		ms = s.lastSegmentStartMs + 1
+	}
+	s.lastSegmentStartMs = ms
+	return ms
+}
+
+// completeCurrentSegmentLocked closes out the current segment (if any),
+// appends it to CompletedSegments, and clears CurrentSegment. Callers must
+// hold s.mu.
+func (s *recSession) completeCurrentSegmentLocked(end time.Time, reason string) *callSegment {
+	seg := s.CurrentSegment
+	if seg == nil {
+		return nil
+	}
+	completed := *seg
+	completed.EndTime = end.UTC().Format(time.RFC3339Nano)
+	completed.StopReason = reason
+	s.CompletedSegments = append(s.CompletedSegments, &completed)
+	s.CurrentSegment = nil
+	return &completed
+}
+
+// finalize atomically completes the current segment and marks the session
+// closed under a single hold of s.mu, then returns the completed segment
+// (nil if there wasn't one, e.g. the session was already closed) and the
+// legs to close.
+//
+// This must NOT be split into a completeCurrentSegmentLocked call followed
+// by a separate call to Close(): a concurrent SplitRecording could acquire
+// s.mu in the gap between those two critical sections, see closed == false,
+// and open a brand new segment that this call would never observe -- Close()
+// would then close that segment's sink out from under it without ever
+// completing it, silently dropping a segment (no metadata JSON, files never
+// enqueued for upload). Keeping "complete the segment" and "mark closed" in
+// one critical section makes SplitRecording and finalize mutually exclusive:
+// whichever acquires the lock first runs to completion before the other is
+// let in, so no segment can be opened after the session is closed.
+func (s *recSession) finalize(end time.Time, reason string) (*callSegment, []*rtpRecorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, nil
+	}
+	completed := s.completeCurrentSegmentLocked(end, reason)
+	s.closed = true
+	return completed, s.Legs
 }
 
 // Close shuts down all leg recorders exactly once.

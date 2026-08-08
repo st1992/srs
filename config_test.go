@@ -56,6 +56,8 @@ func TestLoadConfig_AppliesDefaults(t *testing.T) {
 	assert.Equal(t, def.RTPNoMediaTimeoutSec, cfg.RTPNoMediaTimeoutSec)
 	assert.Equal(t, def.MaxCallDurationHours, cfg.MaxCallDurationHours)
 	assert.Equal(t, def.StaleSessionCheckIntervalSec, cfg.StaleSessionCheckIntervalSec)
+	assert.Equal(t, def.HTTPListenAddr, cfg.HTTPListenAddr)
+	assert.Equal(t, def.RedisLocatorTTLSeconds, cfg.RedisLocatorTTLSeconds)
 }
 
 func TestLoadConfig_MissingFile(t *testing.T) {
@@ -76,6 +78,8 @@ func TestConfigValidate(t *testing.T) {
 		{name: "empty recording dir", mutate: func(c *Config) { c.RecordingDir = "" }, wantErr: true},
 		{name: "invalid log level", mutate: func(c *Config) { c.LogLevel = "verbose" }, wantErr: true},
 		{name: "valid log level", mutate: func(c *Config) { c.LogLevel = "critical" }, wantErr: false},
+		{name: "empty http listen addr", mutate: func(c *Config) { c.HTTPListenAddr = "" }, wantErr: true},
+		{name: "zero redis ttl", mutate: func(c *Config) { c.RedisLocatorTTLSeconds = 0 }, wantErr: true},
 	}
 
 	for _, tt := range tests {

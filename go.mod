@@ -7,6 +7,7 @@ require (
 	github.com/livekit/media-sdk v0.0.0-20260612175532-3d4d26d136c9
 	github.com/livekit/sipgo v0.13.2-0.20260519205735-a5b4a38b6ceb
 	github.com/pion/rtp v1.10.2
+	github.com/redis/go-redis/v9 v9.20.0
 	github.com/stretchr/testify v1.11.1
 	github.com/sumeet265771-wq/gcp-license-guard-go v0.0.0-20260805060939-fbc095af8109
 	google.golang.org/api v0.292.0
