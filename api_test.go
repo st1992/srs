@@ -50,7 +50,7 @@ func newTestSplitServer(t *testing.T) (*recorderServer, *recSession) {
 		CreatedAt:          startTime,
 		lastSegmentStartMs: startMs,
 	}
-	sess.beginRecordingSegmentLocked(startTime)
+	sess.beginRecordingSegmentLocked(startTime, startMs)
 	srv.sessions.Set(sess.CallID, sess)
 
 	t.Cleanup(sess.Close)

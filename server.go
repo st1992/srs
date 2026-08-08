@@ -463,7 +463,7 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 		CreatedAt:          startTime,
 		lastSegmentStartMs: startTimeMs,
 	}
-	sess.beginRecordingSegmentLocked(startTime)
+	sess.beginRecordingSegmentLocked(startTime, startTimeMs)
 	s.sessions.Set(callID, sess)
 	if locatorRegistered {
 		s.startLocatorRenewal(callID)
@@ -698,7 +698,7 @@ func (s *recorderServer) rotateSegment(sess *recSession, now time.Time, reason s
 	}
 
 	completed := sess.completeCurrentSegmentLocked(now, reason)
-	sess.beginRecordingSegmentLocked(now)
+	sess.beginRecordingSegmentLocked(now, startMs)
 	sess.CurrentSegment.RequestMetadata = requestMetadata
 	newSeq := sess.CurrentSegment.Sequence
 	newFiles := sess.CurrentSegment.RecordingFiles
@@ -871,8 +871,10 @@ type callMetadataRecord struct {
 // writeSegmentMetadataJSON serialises a single completed recording segment
 // to a JSON file in the recording directory and returns its path. The
 // filename shares the same stem as that segment's recording files:
-// {callID}-{dnis}-{ani}-{createdAtMs}-seg{NNN}.json, so the JSON and its
-// matching .ulaw files can always be correlated.
+// {callID}-{dnis}-{ani}-{startMs}.json, using that segment's own start-time
+// timestamp (the same one embedded in its .ulaw file names, see
+// newFileSink) so the JSON and its matching .ulaw files can always be
+// correlated.
 func (s *recorderServer) writeSegmentMetadataJSON(sess *recSession, seg *callSegment, byeMeta *SiprecMetadata, reinviteMeta *SiprecMetadata) (string, error) {
 	if seg == nil {
 		return "", fmt.Errorf("missing metadata segment")
@@ -897,12 +899,11 @@ func (s *recorderServer) writeSegmentMetadataJSON(sess *recSession, seg *callSeg
 		return "", fmt.Errorf("marshal metadata: %w", err)
 	}
 
-	name := fmt.Sprintf("%s-%s-%s-%d-seg%03d.json",
+	name := fmt.Sprintf("%s-%s-%s-%d.json",
 		sanitizeFileComponent(sess.CallID),
 		sanitizeFileComponent(sess.DNIS),
 		sanitizeFileComponent(sess.ANI),
-		sess.CreatedAt.UnixMilli(),
-		seg.Sequence,
+		seg.StartMs,
 	)
 	p := filepath.Join(s.cfg.RecordingDir, name)
 	if err := os.WriteFile(p, data, 0o644); err != nil {

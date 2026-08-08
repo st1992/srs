@@ -15,6 +15,13 @@ type callSegment struct {
 	RecordingFiles  map[string]string `json:"recording_files,omitempty"`
 	RequestMetadata map[string]any    `json:"request_metadata,omitempty"`
 	StopReason      string            `json:"stop_reason,omitempty"`
+
+	// StartMs is the Unix-millisecond timestamp used to name this segment's
+	// recording files (see newFileSink). It is kept internal (not
+	// serialised) so the segment's metadata JSON file can be named with the
+	// exact same timestamp component, letting the JSON and its matching
+	// .ulaw files always be correlated by filename alone.
+	StartMs int64 `json:"-"`
 }
 
 // recSession tracks a single SIPREC recording call and its two media legs.
@@ -94,11 +101,15 @@ func (s *recSession) recordingFilesLocked() map[string]string {
 }
 
 // beginRecordingSegmentLocked opens a new current segment starting at start,
-// seeded with the legs' current recording file paths. Callers must hold s.mu.
-func (s *recSession) beginRecordingSegmentLocked(start time.Time) {
+// seeded with the legs' current recording file paths. startMs is the
+// Unix-millisecond timestamp used to name those recording files (from
+// nextSegmentStartMsLocked), so the segment's metadata JSON can later be
+// named with the same timestamp. Callers must hold s.mu.
+func (s *recSession) beginRecordingSegmentLocked(start time.Time, startMs int64) {
 	s.CurrentSegment = &callSegment{
 		Sequence:       s.SegmentSeq,
 		StartTime:      start.UTC().Format(time.RFC3339Nano),
+		StartMs:        startMs,
 		RecordingFiles: s.recordingFilesLocked(),
 	}
 	s.SegmentSeq++

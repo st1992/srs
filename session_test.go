@@ -72,7 +72,7 @@ func TestRecSession_SegmentLifecycle(t *testing.T) {
 
 	start := time.Now()
 	sess.mu.Lock()
-	sess.beginRecordingSegmentLocked(start)
+	sess.beginRecordingSegmentLocked(start, start.UnixMilli())
 	sess.mu.Unlock()
 
 	require.NotNil(t, sess.CurrentSegment)
@@ -89,7 +89,8 @@ func TestRecSession_SegmentLifecycle(t *testing.T) {
 
 	sess.mu.Lock()
 	completed := sess.completeCurrentSegmentLocked(time.Now(), "api_split")
-	sess.beginRecordingSegmentLocked(time.Now())
+	now := time.Now()
+	sess.beginRecordingSegmentLocked(now, now.UnixMilli())
 	sess.CurrentSegment.RequestMetadata = map[string]any{"ticket": "t1"}
 	sess.mu.Unlock()
 

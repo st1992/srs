@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,7 +43,20 @@ func TestSplitRecording_MetadataAttachesToNewSegmentNotClosedOne(t *testing.T) {
 	require.NotNil(t, record.Segment)
 	assert.Equal(t, 0, record.Segment.Sequence)
 	assert.Nil(t, record.Segment.RequestMetadata)
-	assert.Contains(t, filepath.Base(meta[0]), "-seg000.json")
+
+	// The metadata JSON must be named with the same timestamp component as
+	// the segment's own .ulaw recording files, not the seg000/seg001-style
+	// suffix used previously -- that way the JSON and its matching audio
+	// files can be correlated by filename alone. Each audio file's stem is
+	// "{metaStem}-{label}", so the metadata stem must be its prefix.
+	metaStem := strings.TrimSuffix(filepath.Base(meta[0]), ".json")
+	require.NotEmpty(t, result.ClosedSegment.RecordingFiles)
+	for _, audioPath := range result.ClosedSegment.RecordingFiles {
+		audioBase := filepath.Base(audioPath)
+		audioStem := strings.TrimSuffix(audioBase, filepath.Ext(audioBase))
+		assert.True(t, strings.HasPrefix(audioStem, metaStem+"-"),
+			"expected metadata stem %q to be a prefix of audio stem %q", metaStem, audioStem)
+	}
 }
 
 func TestSplitRecording_SequenceIncrementsAcrossMultipleSplits(t *testing.T) {
