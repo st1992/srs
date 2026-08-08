@@ -19,11 +19,11 @@ recorder:
       # Pod-local HTTP API (recording-split endpoint). Since recorder pods
       # are co-located on the same host-network node, this must be unique
       # per instance, just like sipPort.
-      httpPort: 8080
+      httpPort: 8090
     - name: recorder-2
       loadBalancerIP: "100.73.23.146"
       sipPort: 5061
-      httpPort: 8081
+      httpPort: 8091
 
   # Recorder pods share the node network namespace. SIP ports must be unique
   # per instance; dynamically allocated RTP ports share one node-wide pool.
@@ -94,13 +94,7 @@ recorder:
     rtpNoMediaTimeoutSec: 5
     maxCallDurationHours: 12
     staleSessionCheckIntervalSec: 300
-
-    # Redis registers "loc:<Call-ID>" -> "<node-ip>:<httpPort>" for the
-    # lifetime of each call, so an external system can discover which
-    # recorder pod owns a call and reach its HTTP API (recording-split)
-    # directly on the node — not through the SIP LoadBalancer. Leave
-    # redisAddr empty to disable the locator; the recorder still runs.
-    redisAddr: ""
+    redisAddr: "100.72.86.53:6379"
     redisDB: 0
     redisLocatorTTLSeconds: 3600
 
