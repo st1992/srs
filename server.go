@@ -652,6 +652,9 @@ type splitResult struct {
 func (s *recorderServer) SplitRecording(ctx context.Context, callID string, metadata map[string]any) (*splitResult, error) {
 	sess, ok := s.sessions.Get(callID)
 	if !ok {
+		sess, ok = s.sessions.GetByPrefix(callID)
+	}
+	if !ok {
 		return nil, errCallNotFound
 	}
 	return s.rotateSegment(sess, time.Now().UTC(), "api_split", metadata, nil)

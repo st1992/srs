@@ -78,6 +78,37 @@ func TestSplitRecording_SequenceIncrementsAcrossMultipleSplits(t *testing.T) {
 	assert.Equal(t, 2, completedCount)
 }
 
+func TestSplitRecording_MatchesByCallIDPrefix(t *testing.T) {
+	fullCallID := "12344555_438274632_47324923@10.10.10.153"
+	srv, sess := newTestSplitServerWithCallID(t, fullCallID)
+
+	result, err := srv.SplitRecording(context.Background(), "12344555", nil)
+	require.NoError(t, err)
+	assert.Equal(t, sess.CallID, result.CallID)
+	assert.Equal(t, 1, result.NewSegmentSeq)
+}
+
+func TestSplitRecording_PrefixMatchPicksMostRecentSession(t *testing.T) {
+	srv, older := newTestSplitServerWithCallID(t, "12344555_111_aaa@10.10.10.1")
+	older.CreatedAt = time.Now().Add(-time.Hour)
+
+	newer := &recSession{
+		CallID:    "12344555_222_bbb@10.10.10.2",
+		CreatedAt: time.Now(),
+		Legs: []*rtpRecorder{
+			closedRecorder("inbound", "/tmp/newer-inbound.ulaw"),
+			closedRecorder("outbound", "/tmp/newer-outbound.ulaw"),
+		},
+	}
+	newer.beginRecordingSegmentLocked(newer.CreatedAt, newer.CreatedAt.UnixMilli())
+	srv.sessions.Set(newer.CallID, newer)
+	t.Cleanup(newer.Close)
+
+	result, err := srv.SplitRecording(context.Background(), "12344555", nil)
+	require.NoError(t, err)
+	assert.Equal(t, newer.CallID, result.CallID)
+}
+
 func TestSplitRecording_CallNotFound(t *testing.T) {
 	srv, _ := newTestSplitServer(t)
 	_, err := srv.SplitRecording(context.Background(), "does-not-exist", nil)

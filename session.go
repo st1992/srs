@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -201,6 +202,34 @@ func (s *sessionStore) Get(callID string) (*recSession, bool) {
 	sess, ok := s.sessions[callID]
 	s.mu.RUnlock()
 	return sess, ok
+}
+
+// callIDPrefix returns the portion of a SIP Call-ID before its first "_",
+// e.g. "12344555" for "12344555_438274632_47324923@10.10.10.153". If the
+// Call-ID contains no "_", the whole string is returned.
+func callIDPrefix(callID string) string {
+	if idx := strings.IndexByte(callID, '_'); idx >= 0 {
+		return callID[:idx]
+	}
+	return callID
+}
+
+// GetByPrefix looks up a session whose Call-ID's leading "_"-delimited
+// segment equals prefix (see callIDPrefix). If more than one session
+// matches, the most recently created one is returned.
+func (s *sessionStore) GetByPrefix(prefix string) (*recSession, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var best *recSession
+	for _, sess := range s.sessions {
+		if callIDPrefix(sess.CallID) != prefix {
+			continue
+		}
+		if best == nil || sess.CreatedAt.After(best.CreatedAt) {
+			best = sess
+		}
+	}
+	return best, best != nil
 }
 
 func (s *sessionStore) Set(callID string, sess *recSession) {

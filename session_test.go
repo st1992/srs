@@ -38,6 +38,42 @@ func TestSessionStore_SetGetExistsDelete(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestSessionStore_GetByPrefix(t *testing.T) {
+	store := newSessionStore()
+
+	full := "12344555_438274632_47324923@10.10.10.153"
+	sess := &recSession{CallID: full, CreatedAt: time.Now()}
+	store.Set(full, sess)
+
+	got, ok := store.GetByPrefix("12344555")
+	require.True(t, ok)
+	assert.Equal(t, full, got.CallID)
+
+	_, ok = store.GetByPrefix("1234")
+	assert.False(t, ok, "a partial prefix shorter than the full leading segment must not match")
+
+	_, ok = store.GetByPrefix("missing")
+	assert.False(t, ok)
+}
+
+func TestSessionStore_GetByPrefix_ReturnsMostRecentOnAmbiguity(t *testing.T) {
+	store := newSessionStore()
+
+	older := &recSession{CallID: "12344555_111_aaa@10.10.10.1", CreatedAt: time.Now().Add(-time.Hour)}
+	newer := &recSession{CallID: "12344555_222_bbb@10.10.10.2", CreatedAt: time.Now()}
+	store.Set(older.CallID, older)
+	store.Set(newer.CallID, newer)
+
+	got, ok := store.GetByPrefix("12344555")
+	require.True(t, ok)
+	assert.Equal(t, newer.CallID, got.CallID)
+}
+
+func TestCallIDPrefix(t *testing.T) {
+	assert.Equal(t, "12344555", callIDPrefix("12344555_438274632_47324923@10.10.10.153"))
+	assert.Equal(t, "call-1", callIDPrefix("call-1"))
+}
+
 func TestRecSession_RecordingFiles(t *testing.T) {
 	sess := &recSession{
 		CallID: "call-1",

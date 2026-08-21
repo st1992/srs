@@ -16,6 +16,10 @@ import (
 // ("call-1") backed by real loopback rtpRecorders, so SplitRecording exercises
 // the actual sink-swap path (not a mock).
 func newTestSplitServer(t *testing.T) (*recorderServer, *recSession) {
+	return newTestSplitServerWithCallID(t, "call-1")
+}
+
+func newTestSplitServerWithCallID(t *testing.T, callID string) (*recorderServer, *recSession) {
 	t.Helper()
 	dir := t.TempDir()
 	startTime := time.Now()
@@ -24,7 +28,7 @@ func newTestSplitServer(t *testing.T) (*recorderServer, *recSession) {
 	makeLeg := func(label string) *rtpRecorder {
 		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 		require.NoError(t, err)
-		rec, err := newRTPRecorder(conn, dir, "call-1", "dnis1", "ani1", startMs, label, 0, 0, testLogger())
+		rec, err := newRTPRecorder(conn, dir, callID, "dnis1", "ani1", startMs, label, 0, 0, testLogger())
 		require.NoError(t, err)
 		go rec.run()
 		return rec
@@ -42,7 +46,7 @@ func newTestSplitServer(t *testing.T) (*recorderServer, *recSession) {
 	}
 
 	sess := &recSession{
-		CallID:             "call-1",
+		CallID:             callID,
 		DNIS:               "dnis1",
 		ANI:                "ani1",
 		Legs:               []*rtpRecorder{makeLeg("inbound"), makeLeg("outbound")},
@@ -72,6 +76,26 @@ func TestSplitRecordingAPI_Success(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"call_id":"call-1"`)
 	assert.Contains(t, rec.Body.String(), `"new_segment_sequence":1`)
+
+	newFiles := sess.RecordingFiles()
+	assert.NotEqual(t, oldFiles["inbound"], newFiles["inbound"])
+	assert.NotEqual(t, oldFiles["outbound"], newFiles["outbound"])
+}
+
+func TestSplitRecordingAPI_MatchesByCallIDPrefix(t *testing.T) {
+	fullCallID := "12344555_438274632_47324923@10.10.10.153"
+	srv, sess := newTestSplitServerWithCallID(t, fullCallID)
+	cfg := *srv.cfg
+	api := NewAPIServer(&cfg, srv, testLogger())
+
+	oldFiles := sess.RecordingFiles()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/recording/split", strings.NewReader(`{"call_id":"12344555"}`))
+	rec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"call_id":"`+fullCallID+`"`)
 
 	newFiles := sess.RecordingFiles()
 	assert.NotEqual(t, oldFiles["inbound"], newFiles["inbound"])
