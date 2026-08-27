@@ -1,9 +1,22 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"time"
+)
+
+// sessionMode tracks whether a call's legs are currently being written to
+// recording files or streamed to Google Agent Assist. Every recSession
+// starts in sessionModeRecording (set in onInvite) and ends in
+// sessionModeClosed (set by finalize).
+type sessionMode string
+
+const (
+	sessionModeRecording   sessionMode = "recording"
+	sessionModeAgentAssist sessionMode = "agent_assist"
+	sessionModeClosed      sessionMode = "closed"
 )
 
 // callSegment describes one continuous slice of a call's recording, from
@@ -11,11 +24,14 @@ import (
 // (another split, or the call's BYE/shutdown).
 type callSegment struct {
 	Sequence        int               `json:"sequence"`
+	Mode            sessionMode       `json:"mode,omitempty"`
 	StartTime       string            `json:"start_time"`
 	EndTime         string            `json:"end_time,omitempty"`
 	RecordingFiles  map[string]string `json:"recording_files,omitempty"`
 	RequestMetadata map[string]any    `json:"request_metadata,omitempty"`
+	ConversationID  string            `json:"agent_assist_conversation_id,omitempty"`
 	StopReason      string            `json:"stop_reason,omitempty"`
+	Error           string            `json:"error,omitempty"`
 
 	// StartMs is the Unix-millisecond timestamp used to name this segment's
 	// recording files (see newFileSink). It is kept internal (not
@@ -23,6 +39,32 @@ type callSegment struct {
 	// exact same timestamp component, letting the JSON and its matching
 	// .ulaw files always be correlated by filename alone.
 	StartMs int64 `json:"-"`
+}
+
+// agentAssistRun tracks one in-progress Agent Assist conversation for a
+// call: the per-leg sinks streaming audio to Dialogflow, and how to tear it
+// down. See agentassist.go.
+type agentAssistRun struct {
+	ConversationID string
+	Sinks          map[string]rtpSink
+	Complete       func(context.Context) error
+}
+
+// complete closes every leg's Agent Assist sink and then completes the
+// underlying Dialogflow conversation. Safe to call on a nil run.
+func (r *agentAssistRun) complete(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	for _, sink := range r.Sinks {
+		if sink != nil {
+			_ = sink.Close()
+		}
+	}
+	if r.Complete == nil {
+		return nil
+	}
+	return r.Complete(ctx)
 }
 
 // recSession tracks a single SIPREC recording call and its two media legs.
@@ -73,6 +115,12 @@ type recSession struct {
 	// order, via completeCurrentSegmentLocked.
 	CompletedSegments []*callSegment
 
+	// Mode is whether the call's legs currently write to recording files or
+	// stream to Agent Assist. AgentAssist holds the in-progress Agent
+	// Assist run when Mode == sessionModeAgentAssist, nil otherwise.
+	Mode        sessionMode
+	AgentAssist *agentAssistRun
+
 	mu     sync.Mutex
 	closed bool
 }
@@ -96,6 +144,9 @@ func (s *recSession) RecordingFiles() map[string]string {
 func (s *recSession) recordingFilesLocked() map[string]string {
 	files := make(map[string]string, len(s.Legs))
 	for _, leg := range s.Legs {
+		if leg.SinkKind() != "recording" {
+			continue
+		}
 		files[leg.label] = leg.Path()
 	}
 	return files
@@ -107,8 +158,10 @@ func (s *recSession) recordingFilesLocked() map[string]string {
 // nextSegmentStartMsLocked), so the segment's metadata JSON can later be
 // named with the same timestamp. Callers must hold s.mu.
 func (s *recSession) beginRecordingSegmentLocked(start time.Time, startMs int64) {
+	s.Mode = sessionModeRecording
 	s.CurrentSegment = &callSegment{
 		Sequence:       s.SegmentSeq,
+		Mode:           sessionModeRecording,
 		StartTime:      start.UTC().Format(time.RFC3339Nano),
 		StartMs:        startMs,
 		RecordingFiles: s.recordingFilesLocked(),
@@ -147,28 +200,38 @@ func (s *recSession) completeCurrentSegmentLocked(end time.Time, reason string) 
 
 // finalize atomically completes the current segment and marks the session
 // closed under a single hold of s.mu, then returns the completed segment
-// (nil if there wasn't one, e.g. the session was already closed) and the
-// legs to close.
+// (nil if there wasn't one, e.g. the session was already closed), the legs
+// to close, and any in-progress Agent Assist run to tear down (nil if the
+// call wasn't in Agent Assist mode).
 //
 // This must NOT be split into a completeCurrentSegmentLocked call followed
-// by a separate call to Close(): a concurrent SplitRecording could acquire
-// s.mu in the gap between those two critical sections, see closed == false,
-// and open a brand new segment that this call would never observe -- Close()
-// would then close that segment's sink out from under it without ever
-// completing it, silently dropping a segment (no metadata JSON, files never
-// enqueued for upload). Keeping "complete the segment" and "mark closed" in
-// one critical section makes SplitRecording and finalize mutually exclusive:
-// whichever acquires the lock first runs to completion before the other is
-// let in, so no segment can be opened after the session is closed.
-func (s *recSession) finalize(end time.Time, reason string) (*callSegment, []*rtpRecorder) {
+// by a separate call to Close(): a concurrent SplitRecording or
+// StartAgentAssist could acquire s.mu in the gap between those two critical
+// sections, see closed == false, and open a brand new segment (or Agent
+// Assist run) that this call would never observe -- Close() would then
+// close that segment's sink out from under it without ever completing it,
+// silently dropping a segment (no metadata JSON, files never enqueued for
+// upload) or leaking an Agent Assist conversation. Keeping "complete the
+// segment", "capture the Agent Assist run", and "mark closed" in one
+// critical section makes SplitRecording/StartAgentAssist/StopAgentAssist and
+// finalize mutually exclusive: whichever acquires the lock first runs to
+// completion before the other is let in, so nothing can be opened after the
+// session is closed.
+func (s *recSession) finalize(end time.Time, reason string) (*callSegment, []*rtpRecorder, *agentAssistRun) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return nil, nil
+		return nil, nil, nil
 	}
 	completed := s.completeCurrentSegmentLocked(end, reason)
+	if completed != nil && s.AgentAssist != nil {
+		completed.ConversationID = s.AgentAssist.ConversationID
+	}
+	run := s.AgentAssist
+	s.AgentAssist = nil
+	s.Mode = sessionModeClosed
 	s.closed = true
-	return completed, s.Legs
+	return completed, s.Legs, run
 }
 
 // Close shuts down all leg recorders exactly once.

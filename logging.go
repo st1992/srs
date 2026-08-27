@@ -111,6 +111,8 @@ const (
 	eventSegmentSplit          = "segment_split"
 	eventSegmentSplitFailed    = "segment_split_failed"
 	eventLocatorRegisterFailed = "locator_register_failed"
+	eventAgentAssistStarted    = "agent_assist_started"
+	eventAgentAssistStopped    = "agent_assist_stopped"
 )
 
 // recoverAndLog is deferred at the top of goroutines/handlers this process

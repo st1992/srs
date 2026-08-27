@@ -26,6 +26,10 @@ type rtpSink interface {
 	WriteRTPPayload([]byte) error
 	Close() error
 	Path() string
+	// Kind identifies what a sink writes to, e.g. "recording" or
+	// "agent_assist" (see agentassist.go). Used to filter which legs count
+	// as recording files (see recSession.recordingFilesLocked).
+	Kind() string
 }
 
 // fileSink writes PCMU payloads straight to a .ulaw file on disk.
@@ -90,6 +94,8 @@ func (s *fileSink) Close() error {
 
 func (s *fileSink) Path() string { return s.path }
 
+func (s *fileSink) Kind() string { return "recording" }
+
 // rtpRecorder receives RTP for a single SIPREC leg and writes each valid
 // PCMU packet to the currently selected sink. The sink can be swapped at
 // runtime (e.g. when the recording is split into a new segment); packets
@@ -153,6 +159,17 @@ func (r *rtpRecorder) Path() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.path
+}
+
+// SinkKind returns the current sink's Kind(), or "none" if the recorder has
+// no sink (e.g. already closed).
+func (r *rtpRecorder) SinkKind() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.sink == nil {
+		return "none"
+	}
+	return r.sink.Kind()
 }
 
 // ReplaceSink switches future RTP packets over to next and returns the

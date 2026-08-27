@@ -58,6 +58,11 @@ func TestLoadConfig_AppliesDefaults(t *testing.T) {
 	assert.Equal(t, def.StaleSessionCheckIntervalSec, cfg.StaleSessionCheckIntervalSec)
 	assert.Equal(t, def.HTTPListenAddr, cfg.HTTPListenAddr)
 	assert.Equal(t, def.RedisLocatorTTLSeconds, cfg.RedisLocatorTTLSeconds)
+	assert.Equal(t, def.AgentAssistLocationID, cfg.AgentAssistLocationID)
+	assert.Equal(t, def.AgentAssistSampleRateHertz, cfg.AgentAssistSampleRateHertz)
+	assert.Equal(t, def.AgentAssistSendQueuePackets, cfg.AgentAssistSendQueuePackets)
+	assert.Equal(t, def.AgentAssistEndUserLabels, cfg.AgentAssistEndUserLabels)
+	assert.Equal(t, def.AgentAssistHumanAgentLabels, cfg.AgentAssistHumanAgentLabels)
 }
 
 func TestLoadConfig_MissingFile(t *testing.T) {
@@ -80,6 +85,8 @@ func TestConfigValidate(t *testing.T) {
 		{name: "valid log level", mutate: func(c *Config) { c.LogLevel = "critical" }, wantErr: false},
 		{name: "empty http listen addr", mutate: func(c *Config) { c.HTTPListenAddr = "" }, wantErr: true},
 		{name: "zero redis ttl", mutate: func(c *Config) { c.RedisLocatorTTLSeconds = 0 }, wantErr: true},
+		{name: "zero agent assist sample rate", mutate: func(c *Config) { c.AgentAssistSampleRateHertz = 0 }, wantErr: true},
+		{name: "zero agent assist send queue", mutate: func(c *Config) { c.AgentAssistSendQueuePackets = 0 }, wantErr: true},
 	}
 
 	for _, tt := range tests {

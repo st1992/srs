@@ -32,6 +32,8 @@ func NewAPIServer(cfg *Config, recorder *recorderServer, log *slog.Logger) *apiS
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", api.handleHealth)
 	mux.HandleFunc("/v1/recording/split", api.handleSplitRecording)
+	mux.HandleFunc("/v1/agent-assist/start", api.handleStartAgentAssist)
+	mux.HandleFunc("/v1/agent-assist/stop", api.handleStopAgentAssist)
 	api.server = &http.Server{
 		Addr:              cfg.HTTPListenAddr,
 		Handler:           mux,
@@ -111,11 +113,87 @@ func (a *apiServer) handleSplitRecording(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+type startAgentAssistRequest struct {
+	CallID   string         `json:"call_id"`
+	Metadata map[string]any `json:"metadata"`
+}
+
+type stopAgentAssistRequest struct {
+	CallID string `json:"call_id"`
+}
+
+type agentAssistResponse struct {
+	CallID                    string `json:"call_id"`
+	AgentAssistConversationID string `json:"agent_assist_conversation_id,omitempty"`
+	State                     string `json:"state,omitempty"`
+}
+
+// handleStartAgentAssist reroutes a call's legs from recording to a new
+// Google Agent Assist conversation. See recorderServer.StartAgentAssist.
+func (a *apiServer) handleStartAgentAssist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req startAgentAssistRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.CallID) == "" {
+		writeAPIError(w, http.StatusBadRequest, "call_id is required")
+		return
+	}
+	if req.Metadata == nil {
+		req.Metadata = map[string]any{}
+	}
+	result, err := a.recorder.StartAgentAssist(r.Context(), req.CallID, req.Metadata)
+	if err != nil {
+		a.writeCallError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, agentAssistResponse{
+		CallID:                    result.CallID,
+		AgentAssistConversationID: result.ConversationID,
+		State:                     string(result.State),
+	})
+}
+
+// handleStopAgentAssist ends a call's Agent Assist conversation and reroutes
+// its legs back to recording. See recorderServer.StopAgentAssist.
+func (a *apiServer) handleStopAgentAssist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req stopAgentAssistRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.CallID) == "" {
+		writeAPIError(w, http.StatusBadRequest, "call_id is required")
+		return
+	}
+	result, err := a.recorder.StopAgentAssist(r.Context(), req.CallID)
+	if err != nil {
+		a.writeCallError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, agentAssistResponse{
+		CallID:                    result.CallID,
+		AgentAssistConversationID: result.ConversationID,
+		State:                     string(result.State),
+	})
+}
+
 func (a *apiServer) writeCallError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errCallNotFound):
 		writeAPIError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, errCallClosed):
+		writeAPIError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, errInvalidTransition):
 		writeAPIError(w, http.StatusConflict, err.Error())
 	default:
 		writeAPIError(w, http.StatusInternalServerError, err.Error())

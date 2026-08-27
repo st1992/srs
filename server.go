@@ -24,8 +24,9 @@ import (
 const locatorOperationTimeout = 500 * time.Millisecond
 
 var (
-	errCallNotFound = errors.New("call not found")
-	errCallClosed   = errors.New("call already ended")
+	errCallNotFound      = errors.New("call not found")
+	errCallClosed        = errors.New("call already ended")
+	errInvalidTransition = errors.New("invalid call state transition")
 )
 
 // recorderServer is the minimal SIPREC recording SIP server.
@@ -59,6 +60,10 @@ type recorderServer struct {
 	apiPort        int
 	locatorTTL     time.Duration
 
+	// assist starts/stops Google Agent Assist conversations for calls (see
+	// agentassist.go). A disabledAgentAssistClient when not configured.
+	assist AgentAssistClient
+
 	leaseMu     sync.Mutex
 	leases      map[string]struct{}
 	renewerStop chan struct{}
@@ -68,7 +73,7 @@ type recorderServer struct {
 
 // NewServer constructs the SIP server, registers handlers, and prepares the
 // RTP port allocator. It does not start listening until Start is called.
-func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, locator CallLocator, log *slog.Logger) (*recorderServer, error) {
+func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, locator CallLocator, assist AgentAssistClient, log *slog.Logger) (*recorderServer, error) {
 	mediaIP := cfg.MediaIP
 	if mediaIP == "" {
 		ip, err := detectMediaIP()
@@ -125,6 +130,9 @@ func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, locator Ca
 	if locator == nil {
 		locator = disabledLocator{reason: "not configured"}
 	}
+	if assist == nil {
+		assist = disabledAgentAssistClient{reason: "not configured"}
+	}
 
 	s := &recorderServer{
 		cfg:            cfg,
@@ -140,6 +148,7 @@ func NewServer(cfg *Config, uploader Uploader, metaUploader Uploader, locator Ca
 		reaperStop:     make(chan struct{}),
 		locator:        locator,
 		locatorEnabled: cfg.RedisAddr != "",
+		assist:         assist,
 		apiAdvertiseIP: apiAdvertiseIP,
 		apiPort:        apiPort,
 		locatorTTL:     time.Duration(cfg.RedisLocatorTTLSeconds) * time.Second,
@@ -462,6 +471,7 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 		StartTime:          startTimeISO,
 		CreatedAt:          startTime,
 		lastSegmentStartMs: startTimeMs,
+		Mode:               sessionModeRecording,
 	}
 	sess.beginRecordingSegmentLocked(startTime, startTimeMs)
 	s.sessions.Set(callID, sess)
@@ -681,6 +691,14 @@ func (s *recorderServer) rotateSegment(sess *recSession, now time.Time, reason s
 		sess.mu.Unlock()
 		return nil, errCallClosed
 	}
+	if sess.Mode == sessionModeAgentAssist {
+		// The call's legs are currently streaming to Agent Assist, not
+		// writing to files -- creating new file sinks here would silently
+		// take over from ReplaceSink underneath the live Agent Assist
+		// stream. Reject instead; the caller must StopAgentAssist first.
+		sess.mu.Unlock()
+		return nil, fmt.Errorf("%w: cannot split recording while call is in agent assist mode", errInvalidTransition)
+	}
 
 	startMs := sess.nextSegmentStartMsLocked(now)
 	for _, leg := range sess.Legs {
@@ -756,9 +774,14 @@ func (s *recorderServer) finalizeSession(sess *recSession, endTimeISO string, by
 		endTime = time.Now().UTC()
 	}
 
-	completed, legs := sess.finalize(endTime, reason)
+	completed, legs, agentAssistRun := sess.finalize(endTime, reason)
 	for _, leg := range legs {
 		leg.Close()
+	}
+	if agentAssistRun != nil {
+		if err := agentAssistRun.complete(context.Background()); err != nil {
+			s.log.Error("failed to complete agent assist conversation on finalize", "err", err, "sipCallID", sess.CallID, "conversationID", agentAssistRun.ConversationID)
+		}
 	}
 
 	if completed == nil {
@@ -772,6 +795,242 @@ func (s *recorderServer) finalizeSession(sess *recSession, endTimeISO string, by
 	}
 	for _, p := range completed.RecordingFiles {
 		s.uploader.Enqueue(p)
+	}
+}
+
+// =============================================================================
+// Agent Assist
+// =============================================================================
+
+// agentAssistResult summarizes the outcome of a StartAgentAssist or
+// StopAgentAssist call: the call's Agent Assist conversation (if any) and
+// the mode the call is now in.
+type agentAssistResult struct {
+	CallID         string
+	ConversationID string
+	State          sessionMode
+}
+
+// StartAgentAssist closes out the call's current recording segment and
+// reroutes its legs to a new Google Agent Assist conversation, without
+// dropping any in-flight RTP. It is the Agent Assist analogue of
+// SplitRecording/rotateSegment: same sink-swap-under-lock shape, same
+// segment/metadata bookkeeping, but swapping to agentAssistSinks (see
+// agentassist.go) instead of new fileSinks.
+func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, metadata map[string]any) (*agentAssistResult, error) {
+	sess, ok := s.sessions.Get(callID)
+	if !ok {
+		return nil, errCallNotFound
+	}
+
+	sess.mu.Lock()
+	if sess.closed {
+		sess.mu.Unlock()
+		return nil, errCallClosed
+	}
+	if sess.Mode == sessionModeAgentAssist && sess.AgentAssist != nil {
+		// Idempotent: already in Agent Assist mode.
+		result := &agentAssistResult{CallID: callID, ConversationID: sess.AgentAssist.ConversationID, State: sess.Mode}
+		sess.mu.Unlock()
+		return result, nil
+	}
+	if sess.Mode != sessionModeRecording {
+		state := sess.Mode
+		sess.mu.Unlock()
+		return nil, fmt.Errorf("%w: cannot start agent assist from state %s", errInvalidTransition, state)
+	}
+	labels := make([]string, 0, len(sess.Legs))
+	for _, leg := range sess.Legs {
+		labels = append(labels, leg.label)
+	}
+	sess.mu.Unlock()
+
+	run, err := s.assist.Start(ctx, AgentAssistStartRequest{
+		CallID:        callID,
+		Metadata:      metadata,
+		Labels:        labels,
+		OnStreamError: func(err error) { s.fallbackFromAgentAssist(callID, err) },
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	var oldSinks []rtpSink
+	var completed *callSegment
+
+	sess.mu.Lock()
+	if sess.closed {
+		sess.mu.Unlock()
+		_ = run.complete(context.Background())
+		return nil, errCallClosed
+	}
+	if sess.Mode != sessionModeRecording {
+		state := sess.Mode
+		sess.mu.Unlock()
+		_ = run.complete(context.Background())
+		return nil, fmt.Errorf("%w: cannot start agent assist from state %s", errInvalidTransition, state)
+	}
+	for _, leg := range sess.Legs {
+		next, ok := run.Sinks[leg.label]
+		if !ok {
+			sess.mu.Unlock()
+			_ = run.complete(context.Background())
+			return nil, fmt.Errorf("agent assist stream missing for label %s", leg.label)
+		}
+		oldSinks = append(oldSinks, leg.ReplaceSink(next))
+	}
+	if sess.CurrentSegment != nil {
+		sess.CurrentSegment.RequestMetadata = metadata
+	}
+	completed = sess.completeCurrentSegmentLocked(now, "agent_assist_start")
+	sess.Mode = sessionModeAgentAssist
+	sess.AgentAssist = run
+	sess.CurrentSegment = &callSegment{
+		Sequence:        sess.SegmentSeq,
+		Mode:            sessionModeAgentAssist,
+		StartTime:       now.Format(time.RFC3339Nano),
+		RequestMetadata: metadata,
+		ConversationID:  run.ConversationID,
+	}
+	sess.SegmentSeq++
+	sess.mu.Unlock()
+
+	for _, sink := range oldSinks {
+		if sink == nil {
+			continue
+		}
+		if err := sink.Close(); err != nil {
+			s.log.Error("failed to close pre-agent-assist recording sink", "err", err, "sipCallID", callID, "file", sink.Path())
+		}
+		if p := sink.Path(); p != "" {
+			s.uploader.Enqueue(p)
+		}
+	}
+	if completed != nil {
+		if metaPath, err := s.writeSegmentMetadataJSON(sess, completed, nil, nil); err != nil {
+			s.log.Error("failed to write pre-agent-assist metadata JSON", "err", err, "sipCallID", callID)
+		} else {
+			s.metaUploader.Enqueue(metaPath)
+		}
+	}
+
+	s.log.Info("started agent assist for call",
+		"event", eventAgentAssistStarted,
+		"sipCallID", callID,
+		"conversationID", run.ConversationID,
+	)
+
+	return &agentAssistResult{CallID: callID, ConversationID: run.ConversationID, State: sessionModeAgentAssist}, nil
+}
+
+// StopAgentAssist ends the call's Agent Assist conversation and reroutes its
+// legs back to new recording file sinks, without dropping any in-flight RTP.
+func (s *recorderServer) StopAgentAssist(ctx context.Context, callID string) (*agentAssistResult, error) {
+	return s.stopAgentAssist(ctx, callID, "agent_assist_stop", "")
+}
+
+// stopAgentAssist is the shared core behind StopAgentAssist and
+// fallbackFromAgentAssist (which calls it with a non-empty errText when a
+// Dialogflow stream fails mid-call and the recorder falls back to plain
+// recording automatically).
+func (s *recorderServer) stopAgentAssist(ctx context.Context, callID, reason, errText string) (*agentAssistResult, error) {
+	sess, ok := s.sessions.Get(callID)
+	if !ok {
+		return nil, errCallNotFound
+	}
+
+	now := time.Now().UTC()
+	newSinks := make(map[string]*fileSink, len(sess.Legs))
+
+	sess.mu.Lock()
+	if sess.closed {
+		sess.mu.Unlock()
+		return nil, errCallClosed
+	}
+	if sess.Mode == sessionModeRecording {
+		// Idempotent: already back to recording.
+		result := &agentAssistResult{CallID: callID, State: sess.Mode}
+		if sess.AgentAssist != nil {
+			result.ConversationID = sess.AgentAssist.ConversationID
+		}
+		sess.mu.Unlock()
+		return result, nil
+	}
+	if sess.Mode != sessionModeAgentAssist || sess.AgentAssist == nil {
+		state := sess.Mode
+		sess.mu.Unlock()
+		return nil, fmt.Errorf("%w: cannot stop agent assist from state %s", errInvalidTransition, state)
+	}
+
+	startMs := sess.nextSegmentStartMsLocked(now)
+	for _, leg := range sess.Legs {
+		sink, err := newFileSink(s.cfg.RecordingDir, sess.CallID, sess.DNIS, sess.ANI, startMs, leg.label)
+		if err != nil {
+			sess.mu.Unlock()
+			for _, created := range newSinks {
+				_ = created.Close()
+			}
+			return nil, fmt.Errorf("create new recording sink for label %s: %w", leg.label, err)
+		}
+		newSinks[leg.label] = sink
+	}
+
+	var oldSinks []rtpSink
+	for _, leg := range sess.Legs {
+		oldSinks = append(oldSinks, leg.ReplaceSink(newSinks[leg.label]))
+	}
+	if sess.CurrentSegment != nil && errText != "" {
+		sess.CurrentSegment.Error = errText
+	}
+	completed := sess.completeCurrentSegmentLocked(now, reason)
+	run := sess.AgentAssist
+	sess.AgentAssist = nil
+	sess.beginRecordingSegmentLocked(now, startMs)
+	sess.mu.Unlock()
+
+	for _, sink := range oldSinks {
+		if sink != nil {
+			if err := sink.Close(); err != nil {
+				s.log.Error("failed to close agent assist sink", "err", err, "sipCallID", callID)
+			}
+		}
+	}
+	for _, sink := range newSinks {
+		s.uploader.MarkActive(sink.Path())
+	}
+	if err := run.complete(ctx); err != nil {
+		s.log.Error("failed to complete agent assist conversation", "err", err, "sipCallID", callID, "conversationID", run.ConversationID)
+	}
+	if completed != nil {
+		if metaPath, err := s.writeSegmentMetadataJSON(sess, completed, nil, nil); err != nil {
+			s.log.Error("failed to write agent-assist metadata JSON", "err", err, "sipCallID", callID)
+		} else {
+			s.metaUploader.Enqueue(metaPath)
+		}
+	}
+
+	s.log.Info("stopped agent assist for call, resumed recording",
+		"event", eventAgentAssistStopped,
+		"sipCallID", callID,
+		"reason", reason,
+		"conversationID", run.ConversationID,
+	)
+
+	return &agentAssistResult{CallID: callID, ConversationID: run.ConversationID, State: sessionModeRecording}, nil
+}
+
+// fallbackFromAgentAssist is called (via AgentAssistStartRequest.OnStreamError)
+// when a call's Dialogflow bidi stream fails mid-conversation. It falls the
+// call back to plain recording rather than leaving it silently unrecorded.
+func (s *recorderServer) fallbackFromAgentAssist(callID string, cause error) {
+	if cause == nil {
+		return
+	}
+	if _, err := s.stopAgentAssist(context.Background(), callID, "agent_assist_error", cause.Error()); err != nil {
+		if !errors.Is(err, errCallNotFound) && !errors.Is(err, errInvalidTransition) && !errors.Is(err, errCallClosed) {
+			s.log.Error("failed to fall back from Agent Assist to recording", "err", err, "sipCallID", callID, "cause", cause)
+		}
 	}
 }
 

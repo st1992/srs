@@ -8,12 +8,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// stubRecordingSink is a minimal rtpSink standing in for a real fileSink in
+// tests that don't need to touch disk. Kind() reports "recording" so it's
+// counted by recSession.recordingFilesLocked, matching production legs
+// (which always have a real fileSink attached via newRTPRecorder).
+type stubRecordingSink struct{ path string }
+
+func (s stubRecordingSink) WriteRTPPayload([]byte) error { return nil }
+func (s stubRecordingSink) Close() error                 { return nil }
+func (s stubRecordingSink) Path() string                 { return s.path }
+func (s stubRecordingSink) Kind() string                 { return "recording" }
+
 // closedRecorder builds an rtpRecorder usable in store tests: its done channel
 // is pre-closed so Close() returns immediately without a running read loop.
 func closedRecorder(label, path string) *rtpRecorder {
 	done := make(chan struct{})
 	close(done)
-	return &rtpRecorder{label: label, path: path, log: testLogger(), done: done}
+	return &rtpRecorder{label: label, path: path, sink: stubRecordingSink{path: path}, log: testLogger(), done: done}
 }
 
 func TestSessionStore_SetGetExistsDelete(t *testing.T) {

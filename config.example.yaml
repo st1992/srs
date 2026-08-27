@@ -71,3 +71,17 @@ api_advertise_ip: ""
 redis_addr: ""
 redis_db: 0
 redis_locator_ttl_seconds: 3600
+
+# Google Agent Assist (Dialogflow ES). Reuses gcp_credentials_file above.
+# Leave agent_assist_project_id/agent_assist_conversation_profile_id empty
+# to disable — POST /v1/agent-assist/start then returns an error.
+agent_assist_project_id: ""
+agent_assist_location_id: "global"
+agent_assist_conversation_profile_id: ""
+agent_assist_sample_rate_hertz: 8000
+agent_assist_send_queue_packets: 250
+# Leg labels (see rs-metadata) treated as the end user vs. the human agent
+# when creating Dialogflow participants; any label not listed here is
+# treated as the human agent.
+agent_assist_end_user_labels: ["inbound", "1"]
+agent_assist_human_agent_labels: ["outbound", "2"]

@@ -97,7 +97,14 @@ func main() {
 	}
 	defer locator.Close()
 
-	srv, err := NewServer(cfg, uploader, metaUploader, locator, log)
+	assist, err := NewAgentAssistClient(ctx, cfg, log)
+	if err != nil {
+		log.Error("failed to initialize Agent Assist client", "err", err)
+		os.Exit(1)
+	}
+	defer assist.Close()
+
+	srv, err := NewServer(cfg, uploader, metaUploader, locator, assist, log)
 	if err != nil {
 		log.Error("failed to create SIPREC server", "err", err)
 		os.Exit(1)

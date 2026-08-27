@@ -99,6 +99,18 @@ type Config struct {
 	RedisAddr              string `yaml:"redis_addr"`
 	RedisDB                int    `yaml:"redis_db"`
 	RedisLocatorTTLSeconds int    `yaml:"redis_locator_ttl_seconds"`
+
+	// Agent Assist / Dialogflow configuration. GCPCredentialsFile (above) is
+	// reused for the Dialogflow client, same as for GCS. If
+	// AgentAssistProjectID or AgentAssistConversationProfileID is empty, the
+	// Agent Assist client is disabled and /v1/agent-assist/start fails.
+	AgentAssistProjectID             string   `yaml:"agent_assist_project_id"`
+	AgentAssistLocationID            string   `yaml:"agent_assist_location_id"`
+	AgentAssistConversationProfileID string   `yaml:"agent_assist_conversation_profile_id"`
+	AgentAssistSampleRateHertz       int      `yaml:"agent_assist_sample_rate_hertz"`
+	AgentAssistSendQueuePackets      int      `yaml:"agent_assist_send_queue_packets"`
+	AgentAssistEndUserLabels         []string `yaml:"agent_assist_end_user_labels"`
+	AgentAssistHumanAgentLabels      []string `yaml:"agent_assist_human_agent_labels"`
 }
 
 // DefaultConfig returns a Config populated with sensible defaults.
@@ -121,6 +133,11 @@ func DefaultConfig() Config {
 		StaleSessionCheckIntervalSec: 300,
 		HTTPListenAddr:               "0.0.0.0:8080",
 		RedisLocatorTTLSeconds:       3600,
+		AgentAssistLocationID:        "global",
+		AgentAssistSampleRateHertz:   8000,
+		AgentAssistSendQueuePackets:  250,
+		AgentAssistEndUserLabels:     []string{"inbound", "1"},
+		AgentAssistHumanAgentLabels:  []string{"outbound", "2"},
 	}
 }
 
@@ -167,6 +184,12 @@ func (c *Config) Validate() error {
 	}
 	if c.RedisLocatorTTLSeconds <= 0 {
 		return fmt.Errorf("redis_locator_ttl_seconds must be positive")
+	}
+	if c.AgentAssistSampleRateHertz <= 0 {
+		return fmt.Errorf("agent_assist_sample_rate_hertz must be positive")
+	}
+	if c.AgentAssistSendQueuePackets <= 0 {
+		return fmt.Errorf("agent_assist_send_queue_packets must be positive")
 	}
 	return nil
 }

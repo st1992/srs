@@ -104,6 +104,17 @@ recorder:
     redisDB: 0
     redisLocatorTTLSeconds: 3600
 
+    # Google Agent Assist (Dialogflow). Reuses recorder.gcp above for
+    # credentials. Leave agentAssistProjectId/agentAssistConversationProfileId
+    # empty to disable -- POST /v1/agent-assist/start then returns an error.
+    agentAssistProjectId: ""
+    agentAssistLocationId: "global"
+    agentAssistConversationProfileId: ""
+    agentAssistSampleRateHertz: 8000
+    agentAssistSendQueuePackets: 250
+    agentAssistEndUserLabels: ["inbound", "1"]
+    agentAssistHumanAgentLabels: ["outbound", "2"]
+
 # Stateless signaling proxy. Its dispatcher destinations are generated from
 # recorder.instances and use the recorder Service cluster DNS names.
 proxy:

@@ -58,4 +58,15 @@ data:
     redis_addr: "{{ $root.Values.recorder.config.redisAddr }}"
     redis_db: {{ $root.Values.recorder.config.redisDB | default 0 }}
     redis_locator_ttl_seconds: {{ $root.Values.recorder.config.redisLocatorTTLSeconds | default 3600 }}
+
+    # Google Agent Assist (Dialogflow). Reuses gcp_credentials_file above.
+    # Leave agentAssistProjectId/agentAssistConversationProfileId empty to
+    # disable -- POST /v1/agent-assist/start then returns an error.
+    agent_assist_project_id: "{{ $root.Values.recorder.config.agentAssistProjectId }}"
+    agent_assist_location_id: "{{ $root.Values.recorder.config.agentAssistLocationId | default "global" }}"
+    agent_assist_conversation_profile_id: "{{ $root.Values.recorder.config.agentAssistConversationProfileId }}"
+    agent_assist_sample_rate_hertz: {{ $root.Values.recorder.config.agentAssistSampleRateHertz | default 8000 }}
+    agent_assist_send_queue_packets: {{ $root.Values.recorder.config.agentAssistSendQueuePackets | default 250 }}
+    agent_assist_end_user_labels: {{ $root.Values.recorder.config.agentAssistEndUserLabels | default (list "inbound" "1") | toJson }}
+    agent_assist_human_agent_labels: {{ $root.Values.recorder.config.agentAssistHumanAgentLabels | default (list "outbound" "2") | toJson }}
 {{ end }}
