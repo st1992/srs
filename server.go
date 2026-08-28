@@ -820,8 +820,12 @@ type agentAssistResult struct {
 func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, metadata map[string]any) (*agentAssistResult, error) {
 	sess, ok := s.sessions.Get(callID)
 	if !ok {
+		sess, ok = s.sessions.GetByPrefix(callID)
+	}
+	if !ok {
 		return nil, errCallNotFound
 	}
+	callID = sess.CallID
 
 	sess.mu.Lock()
 	if sess.closed {
@@ -937,8 +941,12 @@ func (s *recorderServer) StopAgentAssist(ctx context.Context, callID string) (*a
 func (s *recorderServer) stopAgentAssist(ctx context.Context, callID, reason, errText string) (*agentAssistResult, error) {
 	sess, ok := s.sessions.Get(callID)
 	if !ok {
+		sess, ok = s.sessions.GetByPrefix(callID)
+	}
+	if !ok {
 		return nil, errCallNotFound
 	}
+	callID = sess.CallID
 
 	now := time.Now().UTC()
 	newSinks := make(map[string]*fileSink, len(sess.Legs))

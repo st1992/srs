@@ -164,6 +164,22 @@ func TestStartAgentAssist_PropagatesClientError(t *testing.T) {
 	assert.ErrorContains(t, err, "dialogflow unavailable")
 }
 
+// TestStartAgentAssist_MatchesByCallIDPrefix mirrors
+// TestSplitRecording_MatchesByCallIDPrefix in server_split_test.go: callers
+// may pass just the leading "_"-delimited segment of a Call-ID (see
+// sessionStore.GetByPrefix), same as /v1/recording/split.
+func TestStartAgentAssist_MatchesByCallIDPrefix(t *testing.T) {
+	fullCallID := "12344555_438274632_47324923@10.10.10.153"
+	srv, sess := newTestSplitServerWithCallID(t, fullCallID)
+	fake := &fakeAgentAssistClient{}
+	srv.assist = fake
+
+	result, err := srv.StartAgentAssist(context.Background(), "12344555", nil)
+	require.NoError(t, err)
+	assert.Equal(t, sess.CallID, result.CallID, "the result must carry the resolved full Call-ID, not the prefix the caller sent")
+	assert.Equal(t, sessionModeAgentAssist, result.State)
+}
+
 func TestStopAgentAssist_ResumesRecordingWithNewSegment(t *testing.T) {
 	srv, sess, fake := newTestAgentAssistServer(t)
 
@@ -207,6 +223,21 @@ func TestStopAgentAssist_CallNotFound(t *testing.T) {
 	srv, _, _ := newTestAgentAssistServer(t)
 	_, err := srv.StopAgentAssist(context.Background(), "does-not-exist")
 	assert.ErrorIs(t, err, errCallNotFound)
+}
+
+func TestStopAgentAssist_MatchesByCallIDPrefix(t *testing.T) {
+	fullCallID := "12344555_438274632_47324923@10.10.10.153"
+	srv, sess := newTestSplitServerWithCallID(t, fullCallID)
+	fake := &fakeAgentAssistClient{}
+	srv.assist = fake
+
+	_, err := srv.StartAgentAssist(context.Background(), fullCallID, nil)
+	require.NoError(t, err)
+
+	result, err := srv.StopAgentAssist(context.Background(), "12344555")
+	require.NoError(t, err)
+	assert.Equal(t, sess.CallID, result.CallID)
+	assert.Equal(t, sessionModeRecording, result.State)
 }
 
 func TestSplitRecording_RejectedWhileInAgentAssistMode(t *testing.T) {
@@ -255,6 +286,20 @@ func TestAgentAssistAPI_StartAndStop(t *testing.T) {
 	for _, leg := range sess.Legs {
 		assert.Equal(t, "recording", leg.SinkKind())
 	}
+}
+
+func TestAgentAssistAPI_StartMatchesByCallIDPrefix(t *testing.T) {
+	fullCallID := "12344555_438274632_47324923@10.10.10.153"
+	srv, _ := newTestSplitServerWithCallID(t, fullCallID)
+	srv.assist = &fakeAgentAssistClient{}
+	cfg := *srv.cfg
+	api := NewAPIServer(&cfg, srv, testLogger())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent-assist/start", strings.NewReader(`{"call_id":"12344555"}`))
+	rec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"call_id":"`+fullCallID+`"`)
 }
 
 func TestAgentAssistAPI_StartNotFound(t *testing.T) {
