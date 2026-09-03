@@ -140,7 +140,17 @@ func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStar
 			return nil, fmt.Errorf("create participant for %s: %w", label, err)
 		}
 
-		stream, err := c.participants.BidiStreamingAnalyzeContent(ctx)
+		// The bidi stream must outlive this Start call: it stays open for
+		// the life of the call (until StopAgentAssist/finalizeSession closes
+		// it), potentially long after the caller's ctx is gone -- e.g. the
+		// HTTP handler's r.Context(), which net/http cancels the instant
+		// ServeHTTP returns. Opening it on ctx would tear the stream down
+		// moments after /v1/agent-assist/start responds 200 OK, surfacing
+		// as "context canceled" on Recv followed by EOF on the next Send.
+		// context.Background() decouples the stream's lifetime from the
+		// request that started it; it's torn down via CloseSend when the
+		// sink is Close()'d instead.
+		stream, err := c.participants.BidiStreamingAnalyzeContent(context.Background())
 		if err != nil {
 			cleanup()
 			return nil, fmt.Errorf("open bidi stream for %s: %w", label, err)
