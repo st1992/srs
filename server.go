@@ -482,9 +482,9 @@ func (s *recorderServer) onInvite(_ *slog.Logger, req *sip.Request, tx sip.Serve
 // these always renegotiate with the SAME SDP/media (IP/port/codec) as the
 // original INVITE -- this is the same underlying media session, not a
 // renegotiation -- so the existing RTP sockets/legs are left completely
-// untouched: we just re-answer within the same media parameters and rotate
-// the recording segment (close current .ulaw files + metadata JSON, open
-// new ones), exactly like the POST /v1/recording/split API does.
+// untouched: we just re-answer within the same media parameters. The
+// recording segment is not rotated; the call keeps recording into its
+// current segment.
 func (s *recorderServer) onReInvite(log *slog.Logger, req *sip.Request, tx sip.ServerTransaction, sess *recSession) {
 	log.Info("processing re-INVITE for existing SIPREC session")
 	s.respond(tx, req, sip.StatusTrying, "Trying", nil)
@@ -532,30 +532,10 @@ func (s *recorderServer) onReInvite(log *slog.Logger, req *sip.Request, tx sip.S
 		return
 	}
 
-	// Parse rs-metadata from this INVITE (best effort; attached to the
-	// segment it closes out below, symmetric with how a BYE's rs-metadata
-	// is attached to the segment it closes).
-	var reinviteMeta *SiprecMetadata
-	if rawMeta, mErr := ExtractSiprecMetadata(req); mErr == nil {
-		if parsed, pErr := ParseSiprecMetadata(rawMeta); pErr == nil {
-			reinviteMeta = parsed
-		} else {
-			log.Warn("failed to parse re-INVITE SIPREC metadata", "err", pErr)
-		}
-	}
-
 	resp := CreateSiprecResponse(req, combinedSDP, s.sipContactHost, s.sipContactPort)
 	if err := tx.Respond(resp); err != nil {
 		log.Error("failed to send re-INVITE 200 OK", "err", err)
 		return
-	}
-
-	// Only rotate the segment after the far end has been told the
-	// re-INVITE succeeded. A failure here is non-fatal to the call:
-	// rotateSegment never partially mutates state, so on failure the call
-	// simply keeps recording into its current segment.
-	if _, err := s.rotateSegment(sess, time.Now().UTC(), "reinvite", nil, reinviteMeta); err != nil {
-		log.Error("failed to rotate recording segment for re-INVITE", "err", err, "event", eventSegmentSplitFailed)
 	}
 }
 

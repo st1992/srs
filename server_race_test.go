@@ -67,14 +67,14 @@ func TestConcurrent_SplitRaceWithFinalize_NoOrphanedSegment(t *testing.T) {
 	}
 }
 
-// TestConcurrent_ReinviteRaceWithFinalize_NoOrphanedSegment is the
-// re-INVITE-triggered counterpart to
-// TestConcurrent_SplitRaceWithFinalize_NoOrphanedSegment: onReInvite calls
-// rotateSegment directly (reason "reinvite") rather than going through the
-// HTTP split API's SplitRecording wrapper, but shares the exact same
-// sess.mu-guarded core, so it must be safe against a BYE landing at the same
-// moment a re-INVITE is being processed.
-func TestConcurrent_ReinviteRaceWithFinalize_NoOrphanedSegment(t *testing.T) {
+// TestConcurrent_DirectRotateRaceWithFinalize_NoOrphanedSegment is the
+// direct-call counterpart to
+// TestConcurrent_SplitRaceWithFinalize_NoOrphanedSegment: it calls
+// rotateSegment directly rather than going through the HTTP split API's
+// SplitRecording wrapper, but shares the exact same sess.mu-guarded core, so
+// it must be safe against a BYE landing at the same moment a rotation is
+// being processed.
+func TestConcurrent_DirectRotateRaceWithFinalize_NoOrphanedSegment(t *testing.T) {
 	const trials = 300
 
 	for i := 0; i < trials; i++ {
@@ -87,7 +87,7 @@ func TestConcurrent_ReinviteRaceWithFinalize_NoOrphanedSegment(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, _ = srv.rotateSegment(sess, time.Now().UTC(), "reinvite", nil, nil)
+			_, _ = srv.rotateSegment(sess, time.Now().UTC(), "api_split", nil, nil)
 		}()
 		go func() {
 			defer wg.Done()

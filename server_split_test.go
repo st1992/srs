@@ -155,20 +155,19 @@ func TestSplitRecording_AudioSeparatedAcrossSegments(t *testing.T) {
 	assert.Equal(t, "after", string(newData))
 }
 
-// TestRotateSegment_ReinviteAttachesMetaToClosedSegmentNotNew mirrors the
-// re-INVITE path (onReInvite calls rotateSegment directly, not through the
-// HTTP split API): the rs-metadata carried by the request that triggered
-// the rotation belongs on the segment being CLOSED, not the new one --
-// symmetric with how finalizeSession attaches BYE metadata to the segment
-// it closes.
-func TestRotateSegment_ReinviteAttachesMetaToClosedSegmentNotNew(t *testing.T) {
+// TestRotateSegment_ClosedSegmentMetaAttachesToClosedSegmentNotNew verifies
+// that closedSegmentMeta -- caller-supplied SIPREC rs-metadata associated
+// with whatever triggered the rotation -- belongs on the segment being
+// CLOSED, not the new one, symmetric with how finalizeSession attaches BYE
+// metadata to the segment it closes.
+func TestRotateSegment_ClosedSegmentMetaAttachesToClosedSegmentNotNew(t *testing.T) {
 	srv, sess := newTestSplitServer(t)
-	reinviteMeta := &SiprecMetadata{DataMode: "complete"}
+	closedSegmentMeta := &SiprecMetadata{DataMode: "complete"}
 
-	result, err := srv.rotateSegment(sess, time.Now().UTC(), "reinvite", nil, reinviteMeta)
+	result, err := srv.rotateSegment(sess, time.Now().UTC(), "api_split", nil, closedSegmentMeta)
 	require.NoError(t, err)
 	require.NotNil(t, result.ClosedSegment)
-	assert.Equal(t, "reinvite", result.ClosedSegment.StopReason)
+	assert.Equal(t, "api_split", result.ClosedSegment.StopReason)
 
 	meta := srv.metaUploader.(*captureUploader).Enqueued()
 	require.Len(t, meta, 1)
@@ -184,13 +183,13 @@ func TestRotateSegment_ReinviteAttachesMetaToClosedSegmentNotNew(t *testing.T) {
 	current := sess.CurrentSegment
 	sess.mu.Unlock()
 	require.NotNil(t, current)
-	assert.Nil(t, current.RequestMetadata, "reinvite-triggered rotations don't carry an external metadata dict for the new segment")
+	assert.Nil(t, current.RequestMetadata, "a closedSegmentMeta-only rotation doesn't carry an external metadata dict for the new segment")
 }
 
 // TestRotateSegment_KeepsExistingLegsUntouched verifies the RTP sockets
 // themselves are never closed or reallocated by a rotation -- only the file
 // sink underneath each leg changes. This is the core assumption behind
-// onReInvite reusing the same ports/answer SDP on every subsequent INVITE.
+// SplitRecording being safe to call mid-call without disrupting in-flight RTP.
 func TestRotateSegment_KeepsExistingLegsUntouched(t *testing.T) {
 	srv, sess := newTestSplitServer(t)
 	originalLegs := append([]*rtpRecorder(nil), sess.Legs...)
@@ -199,7 +198,7 @@ func TestRotateSegment_KeepsExistingLegsUntouched(t *testing.T) {
 		originalConns[i] = leg.conn
 	}
 
-	_, err := srv.rotateSegment(sess, time.Now().UTC(), "reinvite", nil, nil)
+	_, err := srv.rotateSegment(sess, time.Now().UTC(), "api_split", nil, nil)
 	require.NoError(t, err)
 
 	require.Equal(t, originalLegs, sess.Legs, "rotateSegment must not replace the leg slice")
