@@ -76,6 +76,13 @@ redis_locator_ttl_seconds: 3600
 # Leave agent_assist_project_id/agent_assist_conversation_profile_id empty
 # to disable — POST /v1/agent-assist/start then returns an error.
 agent_assist_project_id: ""
+# Must match the region the conversation profile lives in: it also selects the
+# Dialogflow endpoint ("global" uses dialogflow.googleapis.com, any other region
+# uses <region>-dialogflow.googleapis.com), and the global endpoint does not
+# serve regional profiles. Supported: global, us, us-central1, us-east1,
+# us-west1, northamerica-northeast1, europe-west1, europe-west2, europe-west3,
+# europe-west4, europe-west6, asia-southeast1, asia-southeast2, asia-northeast1,
+# asia-south1, australia-southeast1.
 agent_assist_location_id: "global"
 agent_assist_conversation_profile_id: ""
 agent_assist_sample_rate_hertz: 8000

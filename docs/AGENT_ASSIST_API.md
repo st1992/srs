@@ -12,7 +12,7 @@ Set in `config.yaml` (see `config.example.yaml`):
 | Field | Purpose |
 |---|---|
 | `agent_assist_project_id` | GCP project hosting the Dialogflow ES agent. |
-| `agent_assist_location_id` | Dialogflow region. Default `global`. |
+| `agent_assist_location_id` | Dialogflow region; must match the conversation profile's region. Also selects the service endpoint. Default `global`. |
 | `agent_assist_conversation_profile_id` | Conversation profile to use. |
 | `agent_assist_sample_rate_hertz` | Audio sample rate sent/received. Default `8000` (matches PCMU). |
 | `agent_assist_send_queue_packets` | Per-leg outbound buffer depth before `WriteRTPPayload` starts erroring. Default `250`. |
@@ -21,6 +21,45 @@ Set in `config.yaml` (see `config.example.yaml`):
 `gcp_credentials_file` is reused for Dialogflow auth (same credentials as
 GCS). If `agent_assist_project_id` or `agent_assist_conversation_profile_id`
 is empty, the client is disabled and `/start` returns an error.
+
+### Regions
+
+Both global and regional conversation profiles are supported.
+`agent_assist_location_id` does two things: it goes into the resource name
+(`projects/P/locations/L/conversationProfiles/ID`) *and* it selects the
+Dialogflow host — `global` uses `dialogflow.googleapis.com`, every other region
+uses `<region>-dialogflow.googleapis.com`. Both must agree, because the global
+endpoint doesn't serve regional profiles; a regional profile addressed through
+the global host fails with `NOT_FOUND` or `INVALID_ARGUMENT`.
+
+Supported values: `global`, `us`, `us-central1`, `us-east1`, `us-west1`,
+`northamerica-northeast1`, `europe-west1`, `europe-west2`, `europe-west3`,
+`europe-west4`, `europe-west6`, `asia-southeast1`, `asia-southeast2`,
+`asia-northeast1`, `asia-south1`, `australia-southeast1`. (`us` is a
+multi-region and follows the same pattern: `us-dialogflow.googleapis.com`.)
+
+The value isn't validated against that list, so a new Google region works
+without a code change — but a typo only surfaces as a DNS error on the first
+`/start`. The resolved endpoint is logged at startup under
+`component=agent_assist`, so check there first:
+
+```
+level=INFO component=agent_assist msg="agent assist dialogflow endpoint resolved"
+  location=us-central1 endpoint=us-central1-dialogflow.googleapis.com:443
+```
+
+Two things worth knowing before picking a region:
+
+- **Regional conversation profiles can't be created in the Agent Assist
+  console** — it doesn't support regionalization. Create them via the API or
+  `gcloud`; a profile made in the console is global no matter what was selected.
+- **CCAI Transcription's data residency is narrower than the region list
+  above** — it only covers EU, US, and North America (Canada). This is a voice
+  path, so that applies here directly: configuring, say, `asia-south1` does not
+  mean transcription data stays in that region.
+
+See [Regionalization and data residency](https://cloud.google.com/agent-assist/docs/regionalization)
+for the authoritative list.
 
 ## POST /v1/agent-assist/start
 

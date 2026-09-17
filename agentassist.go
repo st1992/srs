@@ -55,6 +55,40 @@ type googleAgentAssistClient struct {
 	participants  *dialogflow.ParticipantsClient
 }
 
+// normalizeAgentAssistLocation trims and lower-cases a configured
+// agent_assist_location_id, defaulting an empty value to "global". Dialogflow
+// region IDs are always lower-case, and the same value feeds both the
+// projects/P/locations/L resource name and the service endpoint, so there is
+// exactly one normalization path.
+func normalizeAgentAssistLocation(location string) string {
+	normalized := strings.ToLower(strings.TrimSpace(location))
+	if normalized == "" {
+		return "global"
+	}
+	return normalized
+}
+
+// dialogflowEndpoint returns the Dialogflow gRPC endpoint serving a location.
+// Regional conversation profiles are only reachable through their region's
+// endpoint: the global host doesn't serve them, so a regional resource name
+// sent to dialogflow.googleapis.com fails with NOT_FOUND/INVALID_ARGUMENT.
+//
+// The ":443" suffix is load-bearing. google.golang.org/api merges a
+// user-supplied endpoint into the client's default by replacing the default's
+// entire "host:port", so a bare hostname here would yield an endpoint with no
+// port at all.
+//
+// There's deliberately no allow-list of known regions: Google adds them over
+// time, and an unknown location just derives a host that fails DNS on the first
+// call -- which the endpoint logged at startup makes easy to spot.
+func dialogflowEndpoint(location string) string {
+	normalized := normalizeAgentAssistLocation(location)
+	if normalized == "global" {
+		return "dialogflow.googleapis.com:443"
+	}
+	return fmt.Sprintf("%s-dialogflow.googleapis.com:443", normalized)
+}
+
 // NewAgentAssistClient builds a Dialogflow-backed AgentAssistClient, reusing
 // cfg.GCPCredentialsFile (the same credentials used for GCS) or Application
 // Default Credentials if unset. Returns a disabledAgentAssistClient (not an
@@ -64,7 +98,16 @@ func NewAgentAssistClient(ctx context.Context, cfg *Config, log *slog.Logger) (A
 		return disabledAgentAssistClient{reason: "agent_assist_project_id and agent_assist_conversation_profile_id are required"}, nil
 	}
 
-	var opts []option.ClientOption
+	location := normalizeAgentAssistLocation(cfg.AgentAssistLocationID)
+	endpoint := dialogflowEndpoint(location)
+
+	log = log.With("component", "agent_assist")
+	// Logged before the clients are built so a construction failure still says
+	// which endpoint was attempted; the clients dial lazily, so a typo'd region
+	// otherwise stays invisible until the first /v1/agent-assist/start.
+	log.Info("agent assist dialogflow endpoint resolved", "location", location, "endpoint", endpoint)
+
+	opts := []option.ClientOption{option.WithEndpoint(endpoint)}
 	if cfg.GCPCredentialsFile != "" {
 		opts = append(opts, option.WithCredentialsFile(cfg.GCPCredentialsFile))
 	}
@@ -81,7 +124,7 @@ func NewAgentAssistClient(ctx context.Context, cfg *Config, log *slog.Logger) (A
 
 	return &googleAgentAssistClient{
 		cfg:           cfg,
-		log:           log.With("component", "agent_assist"),
+		log:           log,
 		conversations: conversations,
 		participants:  participants,
 	}, nil
@@ -192,11 +235,12 @@ func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStar
 	}, nil
 }
 
+// location is the region the conversation and its participants are created in.
+// It shares normalizeAgentAssistLocation with the endpoint derived in
+// NewAgentAssistClient so the resource name and the host it's sent to can't
+// drift apart.
 func (c *googleAgentAssistClient) location() string {
-	if c.cfg.AgentAssistLocationID == "" {
-		return "global"
-	}
-	return c.cfg.AgentAssistLocationID
+	return normalizeAgentAssistLocation(c.cfg.AgentAssistLocationID)
 }
 
 func (c *googleAgentAssistClient) roleForLabel(label string) dialogflowpb.Participant_Role {

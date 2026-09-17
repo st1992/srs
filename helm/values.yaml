@@ -108,6 +108,13 @@ recorder:
     # credentials. Leave agentAssistProjectId/agentAssistConversationProfileId
     # empty to disable -- POST /v1/agent-assist/start then returns an error.
     agentAssistProjectId: ""
+    # Must match the conversation profile's region: it also selects the
+    # Dialogflow endpoint ("global" uses dialogflow.googleapis.com, any other
+    # region uses <region>-dialogflow.googleapis.com), and the global endpoint
+    # does not serve regional profiles. Supported: global, us, us-central1,
+    # us-east1, us-west1, northamerica-northeast1, europe-west1, europe-west2,
+    # europe-west3, europe-west4, europe-west6, asia-southeast1,
+    # asia-southeast2, asia-northeast1, asia-south1, australia-southeast1.
     agentAssistLocationId: "global"
     agentAssistConversationProfileId: ""
     agentAssistSampleRateHertz: 8000

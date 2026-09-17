@@ -328,3 +328,67 @@ func TestAgentAssistAPI_SplitConflictsWhileActive(t *testing.T) {
 	api.server.Handler.ServeHTTP(splitRec, splitReq)
 	assert.Equal(t, http.StatusConflict, splitRec.Code)
 }
+
+// The rest of this file is one named test per scenario, but the endpoint
+// helpers are pure functions of a single string, so a table reads better here
+// -- the same shape TestConfigValidate uses in config_test.go.
+
+func TestNormalizeAgentAssistLocation(t *testing.T) {
+	tests := []struct {
+		name     string
+		location string
+		want     string
+	}{
+		{name: "empty defaults to global", location: "", want: "global"},
+		{name: "whitespace defaults to global", location: "   ", want: "global"},
+		{name: "global passes through", location: "global", want: "global"},
+		{name: "uppercase global lowered", location: "GLOBAL", want: "global"},
+		{name: "us multi-region", location: "us", want: "us"},
+		{name: "surrounding whitespace trimmed", location: "  us-central1  ", want: "us-central1"},
+		{name: "mixed case lowered", location: "US-Central1", want: "us-central1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, normalizeAgentAssistLocation(tt.location))
+		})
+	}
+}
+
+func TestDialogflowEndpoint(t *testing.T) {
+	tests := []struct {
+		name     string
+		location string
+		want     string
+	}{
+		{name: "global", location: "global", want: "dialogflow.googleapis.com:443"},
+		{name: "empty defaults to global", location: "", want: "dialogflow.googleapis.com:443"},
+		{name: "whitespace defaults to global", location: "   ", want: "dialogflow.googleapis.com:443"},
+		{name: "uppercase global", location: "GLOBAL", want: "dialogflow.googleapis.com:443"},
+		{name: "us multi-region", location: "us", want: "us-dialogflow.googleapis.com:443"},
+		{name: "us-central1", location: "us-central1", want: "us-central1-dialogflow.googleapis.com:443"},
+		{name: "europe-west2", location: "europe-west2", want: "europe-west2-dialogflow.googleapis.com:443"},
+		{name: "australia-southeast1", location: "australia-southeast1", want: "australia-southeast1-dialogflow.googleapis.com:443"},
+		{name: "surrounding whitespace trimmed", location: "  us-central1  ", want: "us-central1-dialogflow.googleapis.com:443"},
+		{name: "mixed case lowered", location: "US-Central1", want: "us-central1-dialogflow.googleapis.com:443"},
+		// Deliberate: there's no allow-list of known regions, so an unknown
+		// one still derives a host (and fails DNS on first use) rather than
+		// being silently rewritten to global.
+		{name: "unknown region still derives", location: "mars-north1", want: "mars-north1-dialogflow.googleapis.com:443"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, dialogflowEndpoint(tt.location))
+		})
+	}
+}
+
+// The endpoint is derived in NewAgentAssistClient and the resource name in
+// Start; this guards against the two normalizing differently. location() reads
+// only cfg, so the nil Dialogflow clients here are harmless.
+func TestGoogleAgentAssistClientLocationUsesSharedNormalization(t *testing.T) {
+	c := &googleAgentAssistClient{cfg: &Config{AgentAssistLocationID: "  US-Central1 "}}
+	assert.Equal(t, "us-central1", c.location())
+	assert.Equal(t, "us-central1-dialogflow.googleapis.com:443", dialogflowEndpoint(c.cfg.AgentAssistLocationID))
+}
