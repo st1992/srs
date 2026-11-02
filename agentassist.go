@@ -8,11 +8,14 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	dialogflow "cloud.google.com/go/dialogflow/apiv2beta1"
 	"cloud.google.com/go/dialogflow/apiv2beta1/dialogflowpb"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -183,41 +186,46 @@ func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStar
 			return nil, fmt.Errorf("create participant for %s: %w", label, err)
 		}
 
-		// The bidi stream must outlive this Start call: it stays open for
-		// the life of the call (until StopAgentAssist/finalizeSession closes
-		// it), potentially long after the caller's ctx is gone -- e.g. the
-		// HTTP handler's r.Context(), which net/http cancels the instant
-		// ServeHTTP returns. Opening it on ctx would tear the stream down
+		// Each bidi stream must outlive this Start call: streams stay open
+		// for the life of the call (until StopAgentAssist/finalizeSession
+		// closes the sink), potentially long after the caller's ctx is gone
+		// -- e.g. the HTTP handler's r.Context(), which net/http cancels the
+		// instant ServeHTTP returns. Opening one on ctx would tear it down
 		// moments after /v1/agent-assist/start responds 200 OK, surfacing
 		// as "context canceled" on Recv followed by EOF on the next Send.
-		// context.Background() decouples the stream's lifetime from the
+		// context.Background() decouples a stream's lifetime from the
 		// request that started it; it's torn down via CloseSend when the
-		// sink is Close()'d instead.
-		stream, err := c.participants.BidiStreamingAnalyzeContent(context.Background())
+		// sink rotates off it or is Close()'d instead. The sink calls open
+		// again for each rotation, reusing the same participant.
+		open := func() (bidiAnalyzeStream, error) {
+			stream, err := c.participants.BidiStreamingAnalyzeContent(context.Background())
+			if err != nil {
+				return nil, fmt.Errorf("open bidi stream for %s: %w", label, err)
+			}
+			if err := stream.Send(c.configRequest(participant.Name, params)); err != nil {
+				_ = stream.CloseSend()
+				return nil, fmt.Errorf("send bidi config for %s: %w", label, err)
+			}
+			return stream, nil
+		}
+		stream, err := open()
 		if err != nil {
 			cleanup()
-			return nil, fmt.Errorf("open bidi stream for %s: %w", label, err)
+			return nil, err
 		}
 
-		if err := stream.Send(c.configRequest(participant.Name, params)); err != nil {
-			_ = stream.CloseSend()
-			cleanup()
-			return nil, fmt.Errorf("send bidi config for %s: %w", label, err)
-		}
-
-		sink := &agentAssistSink{
+		sink := newAgentAssistSink(agentAssistSinkParams{
 			label:          label,
 			conversationID: conversationIDFromName(conv.Name),
-			stream:         stream,
-			sendQueue:      make(chan []byte, c.cfg.AgentAssistSendQueuePackets),
-			done:           make(chan struct{}),
+			queuePackets:   c.cfg.AgentAssistSendQueuePackets,
+			sampleRate:     c.cfg.AgentAssistSampleRateHertz,
+			policy:         rotationPolicyFromConfig(c.cfg),
 			onError:        req.OnStreamError,
 			log:            c.log.With("sipCallID", req.CallID, "label", label, "conversation", conv.Name),
-		}
+		}, stream, open)
 		created = append(created, sink)
 		sinks[label] = sink
-		go sink.sendLoop()
-		go sink.recvLoop()
+		sink.start()
 	}
 
 	return &agentAssistRun{
@@ -289,20 +297,172 @@ type bidiAnalyzeStream interface {
 	CloseSend() error
 }
 
+// dialogflowStreamAudioLimitSeconds is Dialogflow's cap on input audio per
+// BidiStreamingAnalyzeContent stream; past it the stream fails with
+// OutOfRange "More than 14 minutes of input audio".
+const dialogflowStreamAudioLimitSeconds = 840
+
+const (
+	// maxStreamRetries is how many times in a row a failed stream is
+	// reopened before the sink gives up and the call falls back to recording.
+	maxStreamRetries = 2
+	// streamRetryResetAudio is how much audio a stream must carry before
+	// the retry budget is restored.
+	streamRetryResetAudio = 60 * time.Second
+	// rotateRetryInterval is how long to wait before trying again after a
+	// proactive rotation failed to open the new stream.
+	rotateRetryInterval = 2 * time.Second
+)
+
+// streamRetryBackoff is the wait before each reopen attempt, indexed by
+// how many retries have already been used.
+var streamRetryBackoff = [maxStreamRetries]time.Duration{250 * time.Millisecond, time.Second}
+
+const (
+	rotateReasonFinal      = "utterance_final"
+	rotateReasonIdle       = "recognizer_idle"
+	rotateReasonHardLimit  = "hard_limit"
+	rotateReasonErrorRetry = "error_retry"
+)
+
+// rotationPolicy decides when a stream has carried enough audio to be
+// swapped for a fresh one before Dialogflow's per-stream limit. Durations
+// are audio time, except idle which is wall time since the recognizer last
+// reported speech.
+type rotationPolicy struct {
+	rotateAfter time.Duration
+	hardLimit   time.Duration
+	idle        time.Duration
+}
+
+func rotationPolicyFromConfig(cfg *Config) rotationPolicy {
+	return rotationPolicy{
+		rotateAfter: time.Duration(cfg.AgentAssistStreamRotateAfterSeconds) * time.Second,
+		hardLimit:   time.Duration(cfg.AgentAssistStreamHardLimitSeconds) * time.Second,
+		idle:        time.Duration(cfg.AgentAssistStreamIdleMillis) * time.Millisecond,
+	}
+}
+
+// reason returns why a stream that has carried audio should be rotated now,
+// or "" if it shouldn't yet. atFinal is true when called for a final
+// transcript (an utterance boundary); idleFor is how long the recognizer has
+// been quiet. Past rotateAfter the switch waits for a boundary so a sentence
+// isn't split across streams; at hardLimit it happens regardless.
+func (p rotationPolicy) reason(audio time.Duration, atFinal bool, idleFor time.Duration) string {
+	switch {
+	case audio >= p.hardLimit:
+		return rotateReasonHardLimit
+	case audio < p.rotateAfter:
+		return ""
+	case atFinal:
+		return rotateReasonFinal
+	case idleFor >= p.idle:
+		return rotateReasonIdle
+	}
+	return ""
+}
+
+// isRetryableStreamErr reports whether a failed stream is worth reopening.
+// io.EOF is what Send returns once the server has ended the stream; the
+// real status (if any) arrives on Recv.
+func isRetryableStreamErr(err error) bool {
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	switch status.Code(err) {
+	case codes.OutOfRange, codes.Unavailable, codes.Internal, codes.Aborted, codes.ResourceExhausted:
+		return true
+	}
+	return false
+}
+
+type streamEventKind int
+
+const (
+	streamEventInterim streamEventKind = iota
+	streamEventFinal
+	streamEventErr
+)
+
+// streamEvent is what a stream's recvLoop reports to sendLoop. gen
+// identifies the stream so events from a retired stream are ignored.
+type streamEvent struct {
+	gen  uint64
+	kind streamEventKind
+	err  error
+}
+
 // agentAssistSink is an rtpSink that queues each leg's RTP payloads and
-// streams them to Dialogflow over a bidi AnalyzeContent stream.
+// streams them to Dialogflow over a bidi AnalyzeContent stream, rotating
+// onto a new stream for the same participant before the per-stream audio
+// limit and reopening it on transient errors.
+//
+// sendLoop is the only goroutine that sends on, closes, or swaps the
+// current stream; each stream's recvLoop reports back through events.
 type agentAssistSink struct {
 	label          string
 	conversationID string
-	stream         bidiAnalyzeStream
 	sendQueue      chan []byte
+	events         chan streamEvent
 	done           chan struct{}
 	onError        func(error)
 	log            *slog.Logger
 
+	open        func() (bidiAnalyzeStream, error)
+	policy      rotationPolicy
+	bytesPerSec int
+	now         func() time.Time
+	sleep       func(time.Duration)
+	currentGen  atomic.Uint64
+
+	// Owned by sendLoop.
+	stream          bidiAnalyzeStream
+	gen             uint64
+	bytesSent       int
+	softCrossedAt   time.Time
+	lastSpeechAt    time.Time
+	retries         int
+	nextRotateAfter time.Time
+
 	mu       sync.Mutex
 	closed   bool
 	failOnce sync.Once
+}
+
+type agentAssistSinkParams struct {
+	label          string
+	conversationID string
+	queuePackets   int
+	sampleRate     int
+	policy         rotationPolicy
+	onError        func(error)
+	log            *slog.Logger
+}
+
+// newAgentAssistSink wraps an already-configured first stream; open must
+// return further streams configured for the same participant.
+func newAgentAssistSink(p agentAssistSinkParams, stream bidiAnalyzeStream, open func() (bidiAnalyzeStream, error)) *agentAssistSink {
+	return &agentAssistSink{
+		label:          p.label,
+		conversationID: p.conversationID,
+		sendQueue:      make(chan []byte, p.queuePackets),
+		events:         make(chan streamEvent, 16),
+		done:           make(chan struct{}),
+		onError:        p.onError,
+		log:            p.log,
+		open:           open,
+		policy:         p.policy,
+		bytesPerSec:    p.sampleRate, // μ-law: one byte per sample
+		now:            time.Now,
+		sleep:          time.Sleep,
+		stream:         stream,
+	}
+}
+
+func (s *agentAssistSink) start() {
+	s.lastSpeechAt = s.now()
+	go s.sendLoop()
+	go s.recvLoop(s.stream, 0)
 }
 
 func (s *agentAssistSink) WriteRTPPayload(payload []byte) error {
@@ -343,7 +503,31 @@ func (s *agentAssistSink) Kind() string { return "agent_assist" }
 
 func (s *agentAssistSink) sendLoop() {
 	defer close(s.done)
-	for audio := range s.sendQueue {
+	for {
+		select {
+		case audio, ok := <-s.sendQueue:
+			if !ok {
+				if err := s.stream.CloseSend(); err != nil {
+					s.fail(err)
+				}
+				return
+			}
+			if !s.sendAudio(audio) {
+				return
+			}
+		case ev := <-s.events:
+			if !s.handleEvent(ev) {
+				return
+			}
+		}
+	}
+}
+
+// sendAudio sends one payload on the current stream, reopening the stream
+// on a retryable error, then rotates if the stream is due. It returns false
+// once the sink has failed.
+func (s *agentAssistSink) sendAudio(audio []byte) bool {
+	for {
 		err := s.stream.Send(&dialogflowpb.BidiStreamingAnalyzeContentRequest{
 			Request: &dialogflowpb.BidiStreamingAnalyzeContentRequest_Input_{
 				Input: &dialogflowpb.BidiStreamingAnalyzeContentRequest_Input{
@@ -353,14 +537,123 @@ func (s *agentAssistSink) sendLoop() {
 				},
 			},
 		})
-		if err != nil {
+		if err == nil {
+			break
+		}
+		if !s.recover(err) {
 			s.fail(err)
-			return
+			return false
 		}
 	}
-	if err := s.stream.CloseSend(); err != nil {
-		s.fail(err)
+
+	s.bytesSent += len(audio)
+	audioSent := s.audioSent()
+	if audioSent >= streamRetryResetAudio {
+		s.retries = 0
 	}
+	if s.softCrossedAt.IsZero() && audioSent >= s.policy.rotateAfter {
+		s.softCrossedAt = s.now()
+	}
+	s.maybeRotate(false)
+	return true
+}
+
+// handleEvent applies a recvLoop report from the current stream. It returns
+// false once the sink has failed.
+func (s *agentAssistSink) handleEvent(ev streamEvent) bool {
+	if ev.gen != s.gen {
+		return true // from a retired stream that's draining
+	}
+	switch ev.kind {
+	case streamEventInterim:
+		s.lastSpeechAt = s.now()
+	case streamEventFinal:
+		s.lastSpeechAt = s.now()
+		s.maybeRotate(true)
+	case streamEventErr:
+		if !s.recover(ev.err) {
+			s.fail(ev.err)
+			return false
+		}
+	}
+	return true
+}
+
+func (s *agentAssistSink) audioSent() time.Duration {
+	return time.Duration(s.bytesSent) * time.Second / time.Duration(s.bytesPerSec)
+}
+
+// maybeRotate swaps to a fresh stream if the policy says it's time.
+func (s *agentAssistSink) maybeRotate(atFinal bool) {
+	var idleFor time.Duration
+	if !s.softCrossedAt.IsZero() {
+		since := s.lastSpeechAt
+		if s.softCrossedAt.After(since) {
+			since = s.softCrossedAt
+		}
+		idleFor = s.now().Sub(since)
+	}
+	reason := s.policy.reason(s.audioSent(), atFinal, idleFor)
+	if reason == "" || s.now().Before(s.nextRotateAfter) {
+		return
+	}
+	if err := s.rotate(reason); err != nil {
+		// Keep using the current stream and try again shortly; if it hits
+		// the 14-minute limit first, the error path reopens it.
+		s.nextRotateAfter = s.now().Add(rotateRetryInterval)
+		s.log.Warn("agent assist stream rotation failed, keeping current stream", "reason", reason, "err", err)
+	}
+}
+
+// recover reopens the stream after err, within the retry budget. It
+// returns false if err isn't retryable or the budget is spent.
+func (s *agentAssistSink) recover(err error) bool {
+	if !isRetryableStreamErr(err) {
+		return false
+	}
+	for s.retries < maxStreamRetries {
+		s.sleep(streamRetryBackoff[s.retries])
+		s.retries++
+		s.log.Warn("agent assist stream error, reopening", "err", err, "attempt", s.retries)
+		openErr := s.rotate(rotateReasonErrorRetry)
+		if openErr == nil {
+			return true
+		}
+		err = openErr
+	}
+	return false
+}
+
+// rotate opens a new stream for the same participant and makes it current.
+// The old stream is half-closed; its recvLoop keeps draining until EOF so
+// its last results are still logged.
+func (s *agentAssistSink) rotate(reason string) error {
+	started := s.now()
+	next, err := s.open()
+	if err != nil {
+		return err
+	}
+
+	old, oldAudio := s.stream, s.audioSent()
+	s.gen++
+	s.currentGen.Store(s.gen)
+	s.stream = next
+	s.bytesSent = 0
+	s.softCrossedAt = time.Time{}
+	s.lastSpeechAt = s.now()
+	s.nextRotateAfter = time.Time{}
+	go s.recvLoop(next, s.gen)
+
+	if err := old.CloseSend(); err != nil {
+		s.log.Debug("agent assist close retired stream", "err", err)
+	}
+	s.log.Info("agent assist stream rotated",
+		"reason", reason,
+		"generation", s.gen,
+		"audioSeconds", oldAudio.Seconds(),
+		"openLatencyMs", s.now().Sub(started).Milliseconds(),
+	)
+	return nil
 }
 
 func (s *agentAssistSink) fail(err error) {
@@ -368,25 +661,47 @@ func (s *agentAssistSink) fail(err error) {
 		return
 	}
 	s.failOnce.Do(func() {
-		s.log.Error("agent assist bidi send error", "err", err)
+		s.log.Error("agent assist stream failed", "err", err)
 		if s.onError != nil {
 			go s.onError(err)
 		}
 	})
 }
 
-func (s *agentAssistSink) recvLoop() {
+// report hands an event to sendLoop, or drops it once sendLoop has exited.
+func (s *agentAssistSink) report(ev streamEvent) {
+	select {
+	case s.events <- ev:
+	case <-s.done:
+	}
+}
+
+func (s *agentAssistSink) recvLoop(stream bidiAnalyzeStream, gen uint64) {
 	for {
-		resp, err := s.stream.Recv()
+		resp, err := stream.Recv()
 		if err == io.EOF {
 			return
 		}
 		if err != nil {
-			s.log.Error("agent assist bidi receive error", "err", err)
+			if s.currentGen.Load() == gen {
+				// Logged at Warn: sendLoop reopens the stream if it can and
+				// logs at Error only if it falls back to recording.
+				s.log.Warn("agent assist bidi receive error", "err", err, "generation", gen)
+				s.report(streamEvent{gen: gen, kind: streamEventErr, err: err})
+			} else {
+				s.log.Warn("agent assist bidi receive error on retired stream", "err", err, "generation", gen)
+			}
 			return
 		}
 		if result := resp.GetRecognitionResult(); result != nil {
 			s.log.Debug("agent assist recognition result", "transcript", result.GetTranscript(), "is_final", result.GetIsFinal())
+			if result.GetIsFinal() || result.GetMessageType() == dialogflowpb.StreamingRecognitionResult_END_OF_SINGLE_UTTERANCE {
+				s.report(streamEvent{gen: gen, kind: streamEventFinal})
+			} else if result.GetMessageType() == dialogflowpb.StreamingRecognitionResult_TRANSCRIPT {
+				s.report(streamEvent{gen: gen, kind: streamEventInterim})
+			}
+		} else if resp.GetTurnComplete() != nil {
+			s.report(streamEvent{gen: gen, kind: streamEventFinal})
 		}
 	}
 }

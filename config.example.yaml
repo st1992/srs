@@ -92,3 +92,11 @@ agent_assist_send_queue_packets: 250
 # treated as the human agent.
 agent_assist_end_user_labels: ["inbound", "1"]
 agent_assist_human_agent_labels: ["outbound", "2"]
+# Dialogflow rejects a stream after 14 minutes (840s) of input audio, so each
+# leg's stream is rotated onto a new stream for the same participant first.
+# After rotate_after_seconds of audio it rotates at the next utterance boundary
+# (final transcript, or recognizer idle for idle_millis); at
+# hard_limit_seconds it rotates regardless. hard_limit must be < 840.
+agent_assist_stream_rotate_after_seconds: 780
+agent_assist_stream_hard_limit_seconds: 825
+agent_assist_stream_idle_millis: 800

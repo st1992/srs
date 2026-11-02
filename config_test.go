@@ -63,6 +63,9 @@ func TestLoadConfig_AppliesDefaults(t *testing.T) {
 	assert.Equal(t, def.AgentAssistSendQueuePackets, cfg.AgentAssistSendQueuePackets)
 	assert.Equal(t, def.AgentAssistEndUserLabels, cfg.AgentAssistEndUserLabels)
 	assert.Equal(t, def.AgentAssistHumanAgentLabels, cfg.AgentAssistHumanAgentLabels)
+	assert.Equal(t, 780, cfg.AgentAssistStreamRotateAfterSeconds)
+	assert.Equal(t, 825, cfg.AgentAssistStreamHardLimitSeconds)
+	assert.Equal(t, 800, cfg.AgentAssistStreamIdleMillis)
 }
 
 func TestLoadConfig_MissingFile(t *testing.T) {
@@ -87,6 +90,13 @@ func TestConfigValidate(t *testing.T) {
 		{name: "zero redis ttl", mutate: func(c *Config) { c.RedisLocatorTTLSeconds = 0 }, wantErr: true},
 		{name: "zero agent assist sample rate", mutate: func(c *Config) { c.AgentAssistSampleRateHertz = 0 }, wantErr: true},
 		{name: "zero agent assist send queue", mutate: func(c *Config) { c.AgentAssistSendQueuePackets = 0 }, wantErr: true},
+		{name: "zero stream rotate after", mutate: func(c *Config) { c.AgentAssistStreamRotateAfterSeconds = 0 }, wantErr: true},
+		{name: "hard limit not after rotate", mutate: func(c *Config) { c.AgentAssistStreamHardLimitSeconds = c.AgentAssistStreamRotateAfterSeconds }, wantErr: true},
+		{name: "hard limit at dialogflow cap", mutate: func(c *Config) { c.AgentAssistStreamHardLimitSeconds = 840 }, wantErr: true},
+		{name: "short test-env rotation", mutate: func(c *Config) {
+			c.AgentAssistStreamRotateAfterSeconds, c.AgentAssistStreamHardLimitSeconds = 60, 90
+		}, wantErr: false},
+		{name: "zero stream idle", mutate: func(c *Config) { c.AgentAssistStreamIdleMillis = 0 }, wantErr: true},
 	}
 
 	for _, tt := range tests {

@@ -121,6 +121,15 @@ recorder:
     agentAssistSendQueuePackets: 250
     agentAssistEndUserLabels: ["inbound", "1"]
     agentAssistHumanAgentLabels: ["outbound", "2"]
+    # Dialogflow rejects a stream after 14 minutes (840s) of input audio, so
+    # each leg's stream is rotated onto a new one for the same participant.
+    # After agentAssistStreamRotateAfterSeconds of audio it rotates at the
+    # next utterance boundary (final transcript, or recognizer idle for
+    # agentAssistStreamIdleMillis); at agentAssistStreamHardLimitSeconds it
+    # rotates regardless. The hard limit must be below 840.
+    agentAssistStreamRotateAfterSeconds: 780
+    agentAssistStreamHardLimitSeconds: 825
+    agentAssistStreamIdleMillis: 800
 
 # Stateless signaling proxy. Its dispatcher destinations are generated from
 # recorder.instances and use the recorder Service cluster DNS names.

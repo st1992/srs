@@ -111,6 +111,17 @@ type Config struct {
 	AgentAssistSendQueuePackets      int      `yaml:"agent_assist_send_queue_packets"`
 	AgentAssistEndUserLabels         []string `yaml:"agent_assist_end_user_labels"`
 	AgentAssistHumanAgentLabels      []string `yaml:"agent_assist_human_agent_labels"`
+
+	// Dialogflow caps each BidiStreamingAnalyzeContent stream at 14 minutes
+	// of input audio, so each leg's stream is rotated onto a fresh stream for
+	// the same participant before then. Once a stream has carried
+	// AgentAssistStreamRotateAfterSeconds of audio it is rotated at the next
+	// utterance boundary (a final transcript, or the recognizer idle for
+	// AgentAssistStreamIdleMillis); at AgentAssistStreamHardLimitSeconds it is
+	// rotated regardless.
+	AgentAssistStreamRotateAfterSeconds int `yaml:"agent_assist_stream_rotate_after_seconds"`
+	AgentAssistStreamHardLimitSeconds   int `yaml:"agent_assist_stream_hard_limit_seconds"`
+	AgentAssistStreamIdleMillis         int `yaml:"agent_assist_stream_idle_millis"`
 }
 
 // DefaultConfig returns a Config populated with sensible defaults.
@@ -138,6 +149,10 @@ func DefaultConfig() Config {
 		AgentAssistSendQueuePackets:  250,
 		AgentAssistEndUserLabels:     []string{"inbound", "1"},
 		AgentAssistHumanAgentLabels:  []string{"outbound", "2"},
+
+		AgentAssistStreamRotateAfterSeconds: 780,
+		AgentAssistStreamHardLimitSeconds:   825,
+		AgentAssistStreamIdleMillis:         800,
 	}
 }
 
@@ -190,6 +205,18 @@ func (c *Config) Validate() error {
 	}
 	if c.AgentAssistSendQueuePackets <= 0 {
 		return fmt.Errorf("agent_assist_send_queue_packets must be positive")
+	}
+	if c.AgentAssistStreamRotateAfterSeconds <= 0 {
+		return fmt.Errorf("agent_assist_stream_rotate_after_seconds must be positive")
+	}
+	if c.AgentAssistStreamHardLimitSeconds <= c.AgentAssistStreamRotateAfterSeconds {
+		return fmt.Errorf("agent_assist_stream_hard_limit_seconds must be greater than agent_assist_stream_rotate_after_seconds")
+	}
+	if c.AgentAssistStreamHardLimitSeconds >= dialogflowStreamAudioLimitSeconds {
+		return fmt.Errorf("agent_assist_stream_hard_limit_seconds must be below Dialogflow's %d-second per-stream audio limit", dialogflowStreamAudioLimitSeconds)
+	}
+	if c.AgentAssistStreamIdleMillis <= 0 {
+		return fmt.Errorf("agent_assist_stream_idle_millis must be positive")
 	}
 	return nil
 }

@@ -69,4 +69,7 @@ data:
     agent_assist_send_queue_packets: {{ $root.Values.recorder.config.agentAssistSendQueuePackets | default 250 }}
     agent_assist_end_user_labels: {{ $root.Values.recorder.config.agentAssistEndUserLabels | default (list "inbound" "1") | toJson }}
     agent_assist_human_agent_labels: {{ $root.Values.recorder.config.agentAssistHumanAgentLabels | default (list "outbound" "2") | toJson }}
+    agent_assist_stream_rotate_after_seconds: {{ $root.Values.recorder.config.agentAssistStreamRotateAfterSeconds | default 780 }}
+    agent_assist_stream_hard_limit_seconds: {{ $root.Values.recorder.config.agentAssistStreamHardLimitSeconds | default 825 }}
+    agent_assist_stream_idle_millis: {{ $root.Values.recorder.config.agentAssistStreamIdleMillis | default 800 }}
 {{ end }}
