@@ -118,7 +118,8 @@ recorder:
     agentAssistLocationId: "global"
     agentAssistConversationProfileId: ""
     agentAssistSampleRateHertz: 8000
-    agentAssistSendQueuePackets: 250
+    # Per-leg buffer of 20ms packets (1500 = ~30s) covering a stream reopen.
+    agentAssistSendQueuePackets: 1500
     agentAssistEndUserLabels: ["inbound", "1"]
     agentAssistHumanAgentLabels: ["outbound", "2"]
     # Dialogflow rejects a stream after 14 minutes (840s) of input audio, so

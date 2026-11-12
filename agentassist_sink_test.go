@@ -190,6 +190,7 @@ type sinkHarness struct {
 	logs    *syncBuffer
 	onError atomic.Int32
 	seq     uint16
+	ticks   chan time.Time
 }
 
 func newSinkHarness(t *testing.T, opener *fakeOpener) *sinkHarness {
@@ -202,7 +203,7 @@ func newSinkHarnessWithPolicy(t *testing.T, opener *fakeOpener, policy rotationP
 	if opener == nil {
 		opener = &fakeOpener{}
 	}
-	h := &sinkHarness{opener: opener, clock: &fakeClock{t: time.Unix(0, 0)}, logs: &syncBuffer{}}
+	h := &sinkHarness{opener: opener, clock: &fakeClock{t: time.Unix(0, 0)}, logs: &syncBuffer{}, ticks: make(chan time.Time)}
 	first, err := opener.open()
 	require.NoError(t, err)
 	h.sink = newAgentAssistSink(agentAssistSinkParams{
@@ -215,6 +216,7 @@ func newSinkHarnessWithPolicy(t *testing.T, opener *fakeOpener, policy rotationP
 	}, first, opener.open)
 	h.sink.now = h.clock.now
 	h.sink.sleep = func(time.Duration) {}
+	h.sink.tick = h.ticks
 	h.sink.start()
 	t.Cleanup(func() { _ = h.sink.Close() })
 	return h
@@ -229,6 +231,29 @@ func (h *sinkHarness) write(t *testing.T, n int) {
 		h.seq++
 		require.NoError(t, h.sink.WriteRTPPayload(p))
 	}
+}
+
+// tick fires the sink's rotation-check ticker and returns once sendLoop has
+// finished handling it: the second send can only be taken after the first
+// tick's maybeRotate returns, and a repeat check at the same clock time is a
+// no-op.
+func (h *sinkHarness) tick(t *testing.T) {
+	t.Helper()
+	for i := 0; i < 2; i++ {
+		select {
+		case h.ticks <- time.Time{}:
+		case <-time.After(time.Second):
+			t.Fatal("sendLoop did not take the tick")
+		}
+	}
+}
+
+func (h *sinkHarness) blockOpens() chan struct{} {
+	block := make(chan struct{})
+	h.opener.mu.Lock()
+	h.opener.block = block
+	h.opener.mu.Unlock()
+	return block
 }
 
 // waitAudio waits until stream i has received n audio packets.
@@ -405,16 +430,22 @@ func TestSink_HardLimitForcesRotation(t *testing.T) {
 
 func TestSink_NoAudioLostAcrossRotations(t *testing.T) {
 	h := newSinkHarness(t, nil)
-	const total = 3*2*packetsPerSec + 50 // three hard-limit rotations
+	const total = 3*2*packetsPerSec + 50 // up to three hard-limit rotations
 	h.write(t, total)
 	require.NoError(t, h.sink.Close())
 
+	// New streams open in the background, so a stream may carry a few
+	// packets past the hard limit before the swap; how many rotations fit
+	// varies, but every stream except the last reached the limit.
 	streams := h.opener.allStreams()
-	require.Len(t, streams, 4)
+	require.GreaterOrEqual(t, len(streams), 2)
 	var seqs []uint16
 	for i, s := range streams {
 		assert.True(t, s.firstSendIsConfig(), "stream %d must start with config", i)
-		assert.Equal(t, 1, s.closeSendCount(), "stream %d CloseSend", i)
+		require.Eventually(t, func() bool { return s.closeSendCount() == 1 }, time.Second, time.Millisecond, "stream %d CloseSend", i)
+		if i < len(streams)-1 && len(s.audioSends()) > 0 {
+			assert.GreaterOrEqual(t, len(s.audioSends()), 2*packetsPerSec, "stream %d rotated early", i)
+		}
 		for _, p := range s.audioSends() {
 			seqs = append(seqs, binary.BigEndian.Uint16(p))
 		}
@@ -449,6 +480,7 @@ func TestSink_OpenFailureKeepsCurrentStream(t *testing.T) {
 
 	h.write(t, 2*packetsPerSec+5) // hard limit hit; open fails
 	h.waitAudio(t, 0, 2*packetsPerSec+5)
+	h.waitLog(t, "rotation failed, keeping current stream")
 	assert.Equal(t, 1, h.opener.opened())
 
 	h.clock.advance(rotateRetryInterval)
@@ -489,7 +521,7 @@ func TestSink_RetryBudgetResetsAfterHealthyAudio(t *testing.T) {
 	}
 	h.waitOpened(t, maxStreamRetries+1)
 
-	n := int(streamRetryResetAudio/time.Second) * packetsPerSec
+	n := int(streamRetryResetAge/time.Second) * packetsPerSec
 	h.write(t, n)
 	h.waitAudio(t, maxStreamRetries, n)
 	h.opener.stream(maxStreamRetries).pushErr(status.Error(codes.Unavailable, "unavailable"))
@@ -505,27 +537,139 @@ func TestSink_NonRetryableErrorFailsImmediately(t *testing.T) {
 	h.waitLog(t, "agent assist stream failed")
 }
 
-func TestSink_CloseDuringRotation(t *testing.T) {
+func TestSink_CloseWithPendingOpenClosesBothStreams(t *testing.T) {
 	h := newSinkHarness(t, nil)
-	block := make(chan struct{})
-	h.opener.mu.Lock()
-	h.opener.block = block
-	h.opener.mu.Unlock()
+	block := h.blockOpens()
+	h.write(t, 2*packetsPerSec) // hard limit: background open blocks
+	h.waitAudio(t, 0, 2*packetsPerSec)
 
-	h.write(t, 2*packetsPerSec) // hard limit: open blocks
-	closed := make(chan error, 1)
-	go func() { closed <- h.sink.Close() }()
-	time.Sleep(20 * time.Millisecond)
-	close(block)
-
+	done := make(chan error, 1)
+	go func() { done <- h.sink.Close() }()
 	select {
-	case err := <-closed:
-		require.NoError(t, err)
-	case <-time.After(3 * time.Second):
-		t.Fatal("Close did not return")
+	case err := <-done:
+		require.NoError(t, err) // doesn't wait for the open
+	case <-time.After(time.Second):
+		t.Fatal("Close waited on the background open")
 	}
-	for i, s := range h.opener.allStreams() {
-		assert.Equal(t, 1, s.closeSendCount(), "stream %d CloseSend", i)
-	}
+	assert.Equal(t, 1, h.opener.stream(0).closeSendCount())
+
+	close(block)
+	h.waitOpened(t, 2)
+	require.Eventually(t, func() bool { return h.opener.stream(1).closeSendCount() == 1 }, time.Second, time.Millisecond)
 	assert.ErrorIs(t, h.sink.WriteRTPPayload([]byte{0}), errSinkClosed)
+	assert.Zero(t, h.onError.Load())
+}
+
+func TestSink_RotatesOnClockTimeWithoutAudio(t *testing.T) {
+	h := newSinkHarness(t, nil)
+	h.write(t, 10) // 0.2s of audio, then nothing (hold / silence suppression)
+	h.waitAudio(t, 0, 10)
+	h.clock.advance(2*time.Second - time.Millisecond)
+	h.tick(t)
+	assert.Never(t, func() bool { return h.opener.opened() > 1 }, 50*time.Millisecond, 5*time.Millisecond)
+
+	h.clock.advance(time.Millisecond)
+	h.tick(t)
+	h.waitOpened(t, 2)
+	h.waitLog(t, "reason="+rotateReasonHardLimit)
+	h.waitLog(t, "audioSeconds=0.2 streamSeconds=2")
+}
+
+func TestSink_SilenceGapCountsTowardRotateAfter(t *testing.T) {
+	h := newSinkHarness(t, nil)
+	h.write(t, 5)
+	h.waitAudio(t, 0, 5)
+	h.clock.advance(time.Second) // past rotate-after by clock, not by audio
+	h.tick(t)
+	h.clock.advance(799 * time.Millisecond)
+	h.tick(t)
+	assert.Never(t, func() bool { return h.opener.opened() > 1 }, 50*time.Millisecond, 5*time.Millisecond)
+
+	h.clock.advance(time.Millisecond)
+	h.tick(t)
+	h.waitOpened(t, 2)
+	h.waitLog(t, "reason="+rotateReasonIdle)
+}
+
+func TestSink_InterimSpeechStillBlocksClockRotation(t *testing.T) {
+	h := newSinkHarness(t, nil)
+	speak := func() {
+		h.opener.stream(0).push(interim())
+		h.waitLog(t, "transcript=hello is_final=false")
+		time.Sleep(10 * time.Millisecond) // let sendLoop take the event
+	}
+	h.clock.advance(time.Second) // past rotate-after by clock alone
+	speak()
+	h.tick(t)
+	h.clock.advance(500 * time.Millisecond)
+	speak()
+	h.tick(t)
+	h.clock.advance(400 * time.Millisecond) // 1.9s: under hard limit, 400ms since speech
+	h.tick(t)
+	assert.Never(t, func() bool { return h.opener.opened() > 1 }, 50*time.Millisecond, 5*time.Millisecond)
+
+	h.opener.stream(0).push(final())
+	h.waitOpened(t, 2)
+	h.waitLog(t, "reason="+rotateReasonFinal)
+}
+
+func TestSink_AudioFlowsToOldStreamDuringBackgroundOpen(t *testing.T) {
+	h := newSinkHarness(t, nil)
+	block := h.blockOpens()
+	h.write(t, 2*packetsPerSec+20) // hard limit at 100; open blocks; 20 more
+	h.waitAudio(t, 0, 2*packetsPerSec+20)
+	assert.Equal(t, 1, h.opener.opened())
+
+	close(block)
+	h.waitOpened(t, 2)
+	h.waitLog(t, "agent assist stream rotated")
+	h.write(t, 30)
+	h.waitAudio(t, 1, 30)
+	require.NoError(t, h.sink.Close())
+
+	var seqs []uint16
+	for _, s := range h.opener.allStreams() {
+		for _, p := range s.audioSends() {
+			seqs = append(seqs, binary.BigEndian.Uint16(p))
+		}
+	}
+	require.Len(t, seqs, 2*packetsPerSec+50)
+	for i, seq := range seqs {
+		require.Equal(t, uint16(i), seq)
+	}
+	assert.Len(t, h.opener.stream(0).audioSends(), 2*packetsPerSec+20)
+}
+
+func TestSink_ErrorWhilePendingOpenUsesPendingStream(t *testing.T) {
+	h := newSinkHarness(t, nil)
+	block := h.blockOpens()
+	h.write(t, 2*packetsPerSec) // background open starts and blocks
+	h.waitAudio(t, 0, 2*packetsPerSec)
+	h.opener.stream(0).pushErr(status.Error(codes.OutOfRange, "More than 14 minutes of input audio."))
+	time.Sleep(20 * time.Millisecond)
+
+	close(block)
+	h.waitOpened(t, 2)
+	h.waitLog(t, "reason="+rotateReasonErrorRetry)
+	h.write(t, 5)
+	h.waitAudio(t, 1, 5)
+	assert.Never(t, func() bool { return h.opener.opened() > 2 || h.onError.Load() > 0 }, 100*time.Millisecond, 5*time.Millisecond)
+}
+
+func TestSink_QueueFullReturnsErrSinkFull(t *testing.T) {
+	opener := &fakeOpener{}
+	first, err := opener.open()
+	require.NoError(t, err)
+	sink := newAgentAssistSink(agentAssistSinkParams{
+		label:        "inbound",
+		queuePackets: 1,
+		sampleRate:   testSampleRate,
+		policy:       testPolicy,
+		log:          testLogger(),
+	}, first, opener.open) // not started: nothing drains the queue
+
+	require.NoError(t, sink.WriteRTPPayload([]byte{1}))
+	err = sink.WriteRTPPayload([]byte{2})
+	assert.ErrorIs(t, err, errSinkFull)
+	assert.NotErrorIs(t, err, errSinkClosed)
 }

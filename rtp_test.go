@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -228,6 +229,64 @@ func TestRTPRecorder_ReplaceSink(t *testing.T) {
 	newData, err := os.ReadFile(newSink.Path())
 	require.NoError(t, err)
 	assert.Equal(t, "second", string(newData))
+}
+
+// fullThenAcceptSink reports errSinkFull for its first `full` writes, like
+// an agentAssistSink whose send queue is backed up, then accepts.
+type fullThenAcceptSink struct {
+	memorySink
+	full int
+}
+
+func (s *fullThenAcceptSink) WriteRTPPayload(p []byte) error {
+	s.mu.Lock()
+	if s.full > 0 {
+		s.full--
+		s.mu.Unlock()
+		return fmt.Errorf("agent assist send queue full for label inbound: %w", errSinkFull)
+	}
+	s.mu.Unlock()
+	return s.memorySink.WriteRTPPayload(p)
+}
+
+func TestRTPRecorder_SinkFullDropsPacketAndKeepsRunning(t *testing.T) {
+	dir := t.TempDir()
+	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	require.NoError(t, err)
+	serverAddr := srvConn.LocalAddr().(*net.UDPAddr)
+
+	logs := &syncBuffer{}
+	const pcmuPT = uint8(0)
+	rec, err := newRTPRecorder(srvConn, dir, "callFull", "1", "2", time.Now().UnixMilli(), "inbound", pcmuPT, 0,
+		slog.New(slog.NewTextHandler(logs, nil)))
+	require.NoError(t, err)
+	sink := &fullThenAcceptSink{full: 3}
+	if old := rec.ReplaceSink(sink); old != nil {
+		require.NoError(t, old.Close())
+	}
+	go rec.run()
+	defer rec.Close()
+
+	client, err := net.DialUDP("udp", nil, serverAddr)
+	require.NoError(t, err)
+	defer client.Close()
+
+	for seq := uint16(1); seq <= 5; seq++ {
+		_, err = client.Write(rtpPacket(pcmuPT, seq, []byte{byte(seq)}))
+		require.NoError(t, err)
+	}
+
+	require.Eventually(t, func() bool {
+		sink.mu.Lock()
+		defer sink.mu.Unlock()
+		return len(sink.writes) == 2
+	}, time.Second, 5*time.Millisecond)
+	sink.mu.Lock()
+	assert.Equal(t, [][]byte{{4}, {5}}, sink.writes)
+	sink.mu.Unlock()
+	assert.Equal(t, uint64(3), rec.dropped.Load())
+	assert.Equal(t, 1, strings.Count(logs.String(), "agent assist audio dropped"), "drop warning is rate-limited")
+	assert.NotContains(t, logs.String(), "recording stopped")
 }
 
 func TestSanitizeFileComponent(t *testing.T) {

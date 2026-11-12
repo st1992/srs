@@ -146,7 +146,7 @@ func DefaultConfig() Config {
 		RedisLocatorTTLSeconds:       3600,
 		AgentAssistLocationID:        "global",
 		AgentAssistSampleRateHertz:   8000,
-		AgentAssistSendQueuePackets:  250,
+		AgentAssistSendQueuePackets:  1500,
 		AgentAssistEndUserLabels:     []string{"inbound", "1"},
 		AgentAssistHumanAgentLabels:  []string{"outbound", "2"},
 

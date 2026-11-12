@@ -17,7 +17,14 @@ import (
 
 const rtpReadBufferSize = 1500
 
+// dropLogInterval rate-limits the warning for payloads dropped by a full sink.
+const dropLogInterval = 5 * time.Second
+
 var errSinkClosed = errors.New("rtp sink closed")
+
+// errSinkFull is returned (wrapped) by a sink that can't keep up and has
+// dropped the payload; the leg keeps running.
+var errSinkFull = errors.New("rtp sink full")
 
 // rtpSink is the destination for a recording leg's raw PCMU payloads. It can
 // be swapped out at runtime (see rtpRecorder.ReplaceSink) so a call can be
@@ -113,7 +120,10 @@ type rtpRecorder struct {
 	closed  atomic.Bool
 	packets atomic.Uint64
 	bytes   atomic.Uint64
+	dropped atomic.Uint64 // payloads a full sink (errSinkFull) couldn't take
 	done    chan struct{}
+
+	lastDropLog time.Time // owned by run()
 
 	noMediaTimer *time.Timer
 }
@@ -228,12 +238,28 @@ func (r *rtpRecorder) run() {
 				// but the recorder itself is healthy.
 				continue
 			}
+			if errors.Is(err, errSinkFull) {
+				// The sink (e.g. Agent Assist while its stream reopens) is
+				// backed up; drop this payload but keep the leg running.
+				r.noteDropped(err)
+				continue
+			}
 			r.log.Log(context.Background(), LevelCritical, "failed to write RTP payload; recording stopped while call may still be active",
 				"event", eventRecordingStalled, "err", err)
 			return
 		}
 		r.packets.Add(1)
 		r.bytes.Add(uint64(len(pkt.Payload)))
+	}
+}
+
+// noteDropped counts a payload dropped by a full sink, logging at most once
+// per dropLogInterval so a sustained backlog doesn't flood the logs.
+func (r *rtpRecorder) noteDropped(err error) {
+	total := r.dropped.Add(1)
+	if now := time.Now(); now.Sub(r.lastDropLog) >= dropLogInterval {
+		r.lastDropLog = now
+		r.log.Warn("agent assist audio dropped: send queue full", "err", err, "droppedTotal", total)
 	}
 }
 

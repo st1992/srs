@@ -306,12 +306,16 @@ const (
 	// maxStreamRetries is how many times in a row a failed stream is
 	// reopened before the sink gives up and the call falls back to recording.
 	maxStreamRetries = 2
-	// streamRetryResetAudio is how much audio a stream must carry before
-	// the retry budget is restored.
-	streamRetryResetAudio = 60 * time.Second
+	// streamRetryResetAge is how old a stream must get before the retry
+	// budget is restored.
+	streamRetryResetAge = 60 * time.Second
 	// rotateRetryInterval is how long to wait before trying again after a
 	// proactive rotation failed to open the new stream.
 	rotateRetryInterval = 2 * time.Second
+	// rotationCheckInterval is how often the rotation policy is re-checked
+	// when no audio or transcript arrives to trigger it (hold, silence
+	// suppression), so a stream can't age past the limit unnoticed.
+	rotationCheckInterval = time.Second
 )
 
 // streamRetryBackoff is the wait before each reopen attempt, indexed by
@@ -325,10 +329,10 @@ const (
 	rotateReasonErrorRetry = "error_retry"
 )
 
-// rotationPolicy decides when a stream has carried enough audio to be
-// swapped for a fresh one before Dialogflow's per-stream limit. Durations
-// are audio time, except idle which is wall time since the recognizer last
-// reported speech.
+// rotationPolicy decides when a stream is old enough to be swapped for a
+// fresh one before Dialogflow's per-stream limit. rotateAfter and hardLimit
+// apply to the stream's age (see agentAssistSink.streamAge); idle is wall
+// time since the recognizer last reported speech.
 type rotationPolicy struct {
 	rotateAfter time.Duration
 	hardLimit   time.Duration
@@ -343,16 +347,16 @@ func rotationPolicyFromConfig(cfg *Config) rotationPolicy {
 	}
 }
 
-// reason returns why a stream that has carried audio should be rotated now,
-// or "" if it shouldn't yet. atFinal is true when called for a final
+// reason returns why a stream of the given age should be rotated now, or ""
+// if it shouldn't yet. atFinal is true when called for a final
 // transcript (an utterance boundary); idleFor is how long the recognizer has
 // been quiet. Past rotateAfter the switch waits for a boundary so a sentence
 // isn't split across streams; at hardLimit it happens regardless.
-func (p rotationPolicy) reason(audio time.Duration, atFinal bool, idleFor time.Duration) string {
+func (p rotationPolicy) reason(age time.Duration, atFinal bool, idleFor time.Duration) string {
 	switch {
-	case audio >= p.hardLimit:
+	case age >= p.hardLimit:
 		return rotateReasonHardLimit
-	case audio < p.rotateAfter:
+	case age < p.rotateAfter:
 		return ""
 	case atFinal:
 		return rotateReasonFinal
@@ -392,13 +396,21 @@ type streamEvent struct {
 	err  error
 }
 
+// openResult is the outcome of a stream open run in the background.
+type openResult struct {
+	stream bidiAnalyzeStream
+	err    error
+}
+
 // agentAssistSink is an rtpSink that queues each leg's RTP payloads and
 // streams them to Dialogflow over a bidi AnalyzeContent stream, rotating
 // onto a new stream for the same participant before the per-stream audio
 // limit and reopening it on transient errors.
 //
 // sendLoop is the only goroutine that sends on, closes, or swaps the
-// current stream; each stream's recvLoop reports back through events.
+// current stream; each stream's recvLoop reports back through events, and a
+// planned rotation's new stream is opened in the background and handed
+// back through pending while audio keeps flowing to the current one.
 type agentAssistSink struct {
 	label          string
 	conversationID string
@@ -413,16 +425,22 @@ type agentAssistSink struct {
 	bytesPerSec int
 	now         func() time.Time
 	sleep       func(time.Duration)
+	tick        <-chan time.Time // nil until start(), unless a test injects one
+	ticker      *time.Ticker
 	currentGen  atomic.Uint64
 
 	// Owned by sendLoop.
 	stream          bidiAnalyzeStream
 	gen             uint64
+	streamOpenedAt  time.Time
 	bytesSent       int
 	softCrossedAt   time.Time
 	lastSpeechAt    time.Time
 	retries         int
 	nextRotateAfter time.Time
+	pending         chan openResult // in-flight background open; nil if none
+	pendingReason   string
+	pendingStarted  time.Time
 
 	mu       sync.Mutex
 	closed   bool
@@ -461,6 +479,11 @@ func newAgentAssistSink(p agentAssistSinkParams, stream bidiAnalyzeStream, open 
 
 func (s *agentAssistSink) start() {
 	s.lastSpeechAt = s.now()
+	s.streamOpenedAt = s.lastSpeechAt
+	if s.tick == nil {
+		s.ticker = time.NewTicker(rotationCheckInterval)
+		s.tick = s.ticker.C
+	}
 	go s.sendLoop()
 	go s.recvLoop(s.stream, 0)
 }
@@ -476,7 +499,7 @@ func (s *agentAssistSink) WriteRTPPayload(payload []byte) error {
 	case s.sendQueue <- audio:
 		return nil
 	default:
-		return fmt.Errorf("agent assist send queue full for label %s", s.label)
+		return fmt.Errorf("agent assist send queue full for label %s: %w", s.label, errSinkFull)
 	}
 }
 
@@ -503,6 +526,10 @@ func (s *agentAssistSink) Kind() string { return "agent_assist" }
 
 func (s *agentAssistSink) sendLoop() {
 	defer close(s.done)
+	defer s.abandonPending()
+	if s.ticker != nil {
+		defer s.ticker.Stop()
+	}
 	for {
 		select {
 		case audio, ok := <-s.sendQueue:
@@ -519,6 +546,10 @@ func (s *agentAssistSink) sendLoop() {
 			if !s.handleEvent(ev) {
 				return
 			}
+		case res := <-s.pending: // nil channel (no open in flight) never fires
+			s.finishPendingOpen(res)
+		case <-s.tick:
+			s.maybeRotate(false)
 		}
 	}
 }
@@ -547,13 +578,6 @@ func (s *agentAssistSink) sendAudio(audio []byte) bool {
 	}
 
 	s.bytesSent += len(audio)
-	audioSent := s.audioSent()
-	if audioSent >= streamRetryResetAudio {
-		s.retries = 0
-	}
-	if s.softCrossedAt.IsZero() && audioSent >= s.policy.rotateAfter {
-		s.softCrossedAt = s.now()
-	}
 	s.maybeRotate(false)
 	return true
 }
@@ -583,8 +607,29 @@ func (s *agentAssistSink) audioSent() time.Duration {
 	return time.Duration(s.bytesSent) * time.Second / time.Duration(s.bytesPerSec)
 }
 
-// maybeRotate swaps to a fresh stream if the policy says it's time.
+// streamAge is how long the current stream counts as having run. Audio is
+// sent in real time, so wall time since the stream opened is normally the
+// larger term: it keeps counting through hold, silence suppression and
+// packet loss, when no audio is sent but Dialogflow still counts toward
+// its limit. audioSent covers a backlog flushed faster than real time.
+func (s *agentAssistSink) streamAge() time.Duration {
+	return max(s.now().Sub(s.streamOpenedAt), s.audioSent())
+}
+
+// maybeRotate starts opening a fresh stream in the background if the
+// policy says it's time; the swap happens when the open completes.
 func (s *agentAssistSink) maybeRotate(atFinal bool) {
+	age := s.streamAge()
+	if age >= streamRetryResetAge {
+		s.retries = 0
+	}
+	if s.softCrossedAt.IsZero() && age >= s.policy.rotateAfter {
+		s.softCrossedAt = s.now()
+	}
+	if s.pending != nil {
+		return
+	}
+
 	var idleFor time.Duration
 	if !s.softCrossedAt.IsZero() {
 		since := s.lastSpeechAt
@@ -593,16 +638,46 @@ func (s *agentAssistSink) maybeRotate(atFinal bool) {
 		}
 		idleFor = s.now().Sub(since)
 	}
-	reason := s.policy.reason(s.audioSent(), atFinal, idleFor)
+	reason := s.policy.reason(age, atFinal, idleFor)
 	if reason == "" || s.now().Before(s.nextRotateAfter) {
 		return
 	}
-	if err := s.rotate(reason); err != nil {
-		// Keep using the current stream and try again shortly; if it hits
-		// the 14-minute limit first, the error path reopens it.
+
+	ch := make(chan openResult, 1) // buffered so the opener never blocks
+	open := s.open
+	go func() {
+		stream, err := open()
+		ch <- openResult{stream: stream, err: err}
+	}()
+	s.pending, s.pendingReason, s.pendingStarted = ch, reason, s.now()
+}
+
+// finishPendingOpen swaps to a stream opened in the background, or keeps
+// the current one and retries shortly if the open failed. If the current
+// stream reaches the 14-minute limit first, the error path reopens it.
+func (s *agentAssistSink) finishPendingOpen(res openResult) {
+	s.pending = nil
+	if res.err != nil {
 		s.nextRotateAfter = s.now().Add(rotateRetryInterval)
-		s.log.Warn("agent assist stream rotation failed, keeping current stream", "reason", reason, "err", err)
+		s.log.Warn("agent assist stream rotation failed, keeping current stream", "reason", s.pendingReason, "err", res.err)
+		return
 	}
+	s.swapStream(res.stream, s.pendingReason, s.pendingStarted)
+}
+
+// abandonPending closes any stream a still-running background open
+// produces after sendLoop has exited, so it isn't leaked.
+func (s *agentAssistSink) abandonPending() {
+	if s.pending == nil {
+		return
+	}
+	ch := s.pending
+	s.pending = nil
+	go func() {
+		if res := <-ch; res.stream != nil {
+			_ = res.stream.CloseSend()
+		}
+	}()
 }
 
 // recover reopens the stream after err, within the retry budget. It
@@ -615,8 +690,10 @@ func (s *agentAssistSink) recover(err error) bool {
 		s.sleep(streamRetryBackoff[s.retries])
 		s.retries++
 		s.log.Warn("agent assist stream error, reopening", "err", err, "attempt", s.retries)
-		openErr := s.rotate(rotateReasonErrorRetry)
+		started := s.now()
+		next, openErr := s.openNow()
 		if openErr == nil {
+			s.swapStream(next, rotateReasonErrorRetry, started)
 			return true
 		}
 		err = openErr
@@ -624,20 +701,30 @@ func (s *agentAssistSink) recover(err error) bool {
 	return false
 }
 
-// rotate opens a new stream for the same participant and makes it current.
-// The old stream is half-closed; its recvLoop keeps draining until EOF so
-// its last results are still logged.
-func (s *agentAssistSink) rotate(reason string) error {
-	started := s.now()
-	next, err := s.open()
-	if err != nil {
-		return err
+// openNow returns a new stream for the current one, which has failed. A
+// background open already in flight is waited for and used if it
+// succeeded; otherwise a stream is opened synchronously. Audio arriving
+// meanwhile waits in sendQueue.
+func (s *agentAssistSink) openNow() (bidiAnalyzeStream, error) {
+	if s.pending != nil {
+		res := <-s.pending
+		s.pending = nil
+		if res.err == nil {
+			return res.stream, nil
+		}
 	}
+	return s.open()
+}
 
-	old, oldAudio := s.stream, s.audioSent()
+// swapStream makes next the current stream. The old stream is half-closed;
+// its recvLoop keeps draining until EOF so its last results are still
+// logged.
+func (s *agentAssistSink) swapStream(next bidiAnalyzeStream, reason string, started time.Time) {
+	old, oldAudio, oldAge := s.stream, s.audioSent(), s.now().Sub(s.streamOpenedAt)
 	s.gen++
 	s.currentGen.Store(s.gen)
 	s.stream = next
+	s.streamOpenedAt = s.now()
 	s.bytesSent = 0
 	s.softCrossedAt = time.Time{}
 	s.lastSpeechAt = s.now()
@@ -651,9 +738,9 @@ func (s *agentAssistSink) rotate(reason string) error {
 		"reason", reason,
 		"generation", s.gen,
 		"audioSeconds", oldAudio.Seconds(),
+		"streamSeconds", oldAge.Seconds(),
 		"openLatencyMs", s.now().Sub(started).Milliseconds(),
 	)
-	return nil
 }
 
 func (s *agentAssistSink) fail(err error) {

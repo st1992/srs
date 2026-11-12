@@ -66,7 +66,7 @@ data:
     agent_assist_location_id: "{{ $root.Values.recorder.config.agentAssistLocationId | default "global" }}"
     agent_assist_conversation_profile_id: "{{ $root.Values.recorder.config.agentAssistConversationProfileId }}"
     agent_assist_sample_rate_hertz: {{ $root.Values.recorder.config.agentAssistSampleRateHertz | default 8000 }}
-    agent_assist_send_queue_packets: {{ $root.Values.recorder.config.agentAssistSendQueuePackets | default 250 }}
+    agent_assist_send_queue_packets: {{ $root.Values.recorder.config.agentAssistSendQueuePackets | default 1500 }}
     agent_assist_end_user_labels: {{ $root.Values.recorder.config.agentAssistEndUserLabels | default (list "inbound" "1") | toJson }}
     agent_assist_human_agent_labels: {{ $root.Values.recorder.config.agentAssistHumanAgentLabels | default (list "outbound" "2") | toJson }}
     agent_assist_stream_rotate_after_seconds: {{ $root.Values.recorder.config.agentAssistStreamRotateAfterSeconds | default 780 }}
