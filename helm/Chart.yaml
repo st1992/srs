@@ -4,8 +4,8 @@ description: >
   Streamlink signaling proxy and co-located host-network recorder Deployments
   with per-recorder GKE Internal Passthrough NLBs.
 type: application
-version: 1.1.1
-appVersion: "1.1.1"
+version: 1.1.2
+appVersion: "1.1.2"
 keywords:
   - sip
   - streamlink
