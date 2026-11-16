@@ -15,7 +15,7 @@ Set in `config.yaml` (see `config.example.yaml`):
 | `agent_assist_location_id` | Dialogflow region; must match the conversation profile's region. Also selects the service endpoint. Default `global`. |
 | `agent_assist_conversation_profile_id` | Conversation profile to use. |
 | `agent_assist_sample_rate_hertz` | Audio sample rate sent/received. Default `8000` (matches PCMU). |
-| `agent_assist_send_queue_packets` | Per-leg outbound buffer depth before `WriteRTPPayload` starts erroring. Default `250`. |
+| `agent_assist_send_queue_packets` | Per-leg outbound buffer of 20 ms packets that covers a stream reopen; when full, new packets are dropped with a warning and the leg keeps running. Default `1500` (~30 s). |
 | `agent_assist_end_user_labels` / `agent_assist_human_agent_labels` | Which leg label (e.g. `inbound`/`outbound`) maps to which Dialogflow participant role. |
 
 `gcp_credentials_file` is reused for Dialogflow auth (same credentials as
@@ -111,3 +111,7 @@ live stream.
 
 No RTP is dropped across either transition: sinks are swapped in place on
 the existing leg sockets, the same mechanism `/v1/recording/split` uses.
+
+A call paused with `/v1/recording/pause` stays paused across these
+transitions, and while in Agent Assist mode the silence is what's streamed to
+Dialogflow. See [PAUSE_RESUME_API.md](PAUSE_RESUME_API.md).

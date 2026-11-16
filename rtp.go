@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,12 @@ import (
 )
 
 const rtpReadBufferSize = 1500
+
+// ulawSilence is μ-law digital silence (0xFF), long enough for any payload
+// read into a rtpReadBufferSize buffer. While a leg is paused each payload
+// is replaced by a same-length slice of it, so the paused stretch keeps its
+// real duration. Sinks never retain or modify the slice they're given.
+var ulawSilence = bytes.Repeat([]byte{0xFF}, rtpReadBufferSize)
 
 // dropLogInterval rate-limits the warning for payloads dropped by a full sink.
 const dropLogInterval = 5 * time.Second
@@ -121,6 +128,7 @@ type rtpRecorder struct {
 	packets atomic.Uint64
 	bytes   atomic.Uint64
 	dropped atomic.Uint64 // payloads a full sink (errSinkFull) couldn't take
+	paused  atomic.Bool   // write silence instead of the received audio
 	done    chan struct{}
 
 	lastDropLog time.Time // owned by run()
@@ -182,6 +190,13 @@ func (r *rtpRecorder) SinkKind() string {
 	return r.sink.Kind()
 }
 
+// SetPaused switches the leg between writing the received audio and writing
+// same-length silence in its place (see ulawSilence). It applies to
+// whichever sink is current, and survives ReplaceSink.
+func (r *rtpRecorder) SetPaused(paused bool) {
+	r.paused.Store(paused)
+}
+
 // ReplaceSink switches future RTP packets over to next and returns the
 // previous sink. The caller owns closing the returned sink after the swap.
 func (r *rtpRecorder) ReplaceSink(next rtpSink) rtpSink {
@@ -232,7 +247,11 @@ func (r *rtpRecorder) run() {
 		if sink == nil {
 			continue
 		}
-		if err := sink.WriteRTPPayload(pkt.Payload); err != nil {
+		payload := pkt.Payload
+		if r.paused.Load() {
+			payload = ulawSilence[:len(payload)]
+		}
+		if err := sink.WriteRTPPayload(payload); err != nil {
 			if errors.Is(err, errSinkClosed) {
 				// Narrow race window during a sink swap; the packet is lost
 				// but the recorder itself is healthy.

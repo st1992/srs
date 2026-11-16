@@ -878,6 +878,7 @@ func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, me
 		ConversationID:  run.ConversationID,
 	}
 	sess.SegmentSeq++
+	sess.openPauseLocked(now)
 	sess.mu.Unlock()
 
 	for _, sink := range oldSinks {
@@ -1020,6 +1021,67 @@ func (s *recorderServer) fallbackFromAgentAssist(callID string, cause error) {
 			s.log.Error("failed to fall back from Agent Assist to recording", "err", err, "sipCallID", callID, "cause", cause)
 		}
 	}
+}
+
+// =============================================================================
+// Pause / resume
+// =============================================================================
+
+// pauseResult is the outcome of PauseRecording/ResumeRecording.
+type pauseResult struct {
+	CallID string
+	State  sessionMode
+	Paused bool
+}
+
+// PauseRecording makes a call's legs write silence in place of the call
+// audio, keeping the paused stretch's duration in the recording (or Agent
+// Assist stream). It applies in either mode and carries over through splits
+// and Agent Assist start/stop, since the flag lives on the legs rather than
+// their sinks. Idempotent.
+func (s *recorderServer) PauseRecording(_ context.Context, callID string) (*pauseResult, error) {
+	return s.setPaused(callID, true)
+}
+
+// ResumeRecording undoes PauseRecording: the legs go back to writing the
+// call audio to the same sinks. Idempotent.
+func (s *recorderServer) ResumeRecording(_ context.Context, callID string) (*pauseResult, error) {
+	return s.setPaused(callID, false)
+}
+
+func (s *recorderServer) setPaused(callID string, paused bool) (*pauseResult, error) {
+	sess, ok := s.sessions.Get(callID)
+	if !ok {
+		sess, ok = s.sessions.GetByPrefix(callID)
+	}
+	if !ok {
+		return nil, errCallNotFound
+	}
+	callID = sess.CallID
+
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.closed {
+		return nil, errCallClosed
+	}
+	result := &pauseResult{CallID: callID, State: sess.Mode, Paused: paused}
+	if sess.Paused == paused {
+		return result, nil // idempotent
+	}
+
+	now := time.Now().UTC()
+	sess.Paused = paused
+	for _, leg := range sess.Legs {
+		leg.SetPaused(paused)
+	}
+	if paused {
+		sess.openPauseLocked(now)
+		s.log.Info("recording paused", "sipCallID", callID, "mode", sess.Mode)
+	} else {
+		sess.closePauseLocked(now)
+		s.log.Info("recording resumed", "sipCallID", callID, "mode", sess.Mode)
+	}
+	return result, nil
 }
 
 // =============================================================================

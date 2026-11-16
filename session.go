@@ -32,6 +32,10 @@ type callSegment struct {
 	ConversationID  string            `json:"agent_assist_conversation_id,omitempty"`
 	StopReason      string            `json:"stop_reason,omitempty"`
 	Error           string            `json:"error,omitempty"`
+	// Pauses lists the stretches of this segment during which the legs
+	// wrote silence instead of the call audio (see PauseRecording). A pause
+	// that spans a segment boundary appears in both segments, split at it.
+	Pauses []pauseInterval `json:"pauses,omitempty"`
 
 	// StartMs is the Unix-millisecond timestamp used to name this segment's
 	// recording files (see newFileSink). It is kept internal (not
@@ -39,6 +43,13 @@ type callSegment struct {
 	// exact same timestamp component, letting the JSON and its matching
 	// .ulaw files always be correlated by filename alone.
 	StartMs int64 `json:"-"`
+}
+
+// pauseInterval is one paused stretch of a segment. EndTime is empty while
+// the pause is still in progress.
+type pauseInterval struct {
+	StartTime string `json:"start_time"`
+	EndTime   string `json:"end_time,omitempty"`
 }
 
 // agentAssistRun tracks one in-progress Agent Assist conversation for a
@@ -121,6 +132,10 @@ type recSession struct {
 	Mode        sessionMode
 	AgentAssist *agentAssistRun
 
+	// Paused is whether the legs are writing silence instead of the call
+	// audio (see PauseRecording/ResumeRecording).
+	Paused bool
+
 	mu     sync.Mutex
 	closed bool
 }
@@ -167,6 +182,29 @@ func (s *recSession) beginRecordingSegmentLocked(start time.Time, startMs int64)
 		RecordingFiles: s.recordingFilesLocked(),
 	}
 	s.SegmentSeq++
+	s.openPauseLocked(start)
+}
+
+// openPauseLocked starts a pause interval at start on the current segment
+// if the call is paused: on pause, and on each new segment begun while
+// paused. Callers must hold s.mu.
+func (s *recSession) openPauseLocked(start time.Time) {
+	if !s.Paused || s.CurrentSegment == nil {
+		return
+	}
+	s.CurrentSegment.Pauses = append(s.CurrentSegment.Pauses, pauseInterval{StartTime: start.UTC().Format(time.RFC3339Nano)})
+}
+
+// closePauseLocked ends the current segment's open pause interval, if any,
+// at end. Callers must hold s.mu.
+func (s *recSession) closePauseLocked(end time.Time) {
+	if s.CurrentSegment == nil {
+		return
+	}
+	pauses := s.CurrentSegment.Pauses
+	if n := len(pauses); n > 0 && pauses[n-1].EndTime == "" {
+		pauses[n-1].EndTime = end.UTC().Format(time.RFC3339Nano)
+	}
 }
 
 // nextSegmentStartMsLocked returns a Unix-millisecond timestamp for naming a
@@ -190,6 +228,7 @@ func (s *recSession) completeCurrentSegmentLocked(end time.Time, reason string) 
 	if seg == nil {
 		return nil
 	}
+	s.closePauseLocked(end)
 	completed := *seg
 	completed.EndTime = end.UTC().Format(time.RFC3339Nano)
 	completed.StopReason = reason

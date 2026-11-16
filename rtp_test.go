@@ -289,6 +289,53 @@ func TestRTPRecorder_SinkFullDropsPacketAndKeepsRunning(t *testing.T) {
 	assert.NotContains(t, logs.String(), "recording stopped")
 }
 
+func TestRTPRecorder_PausedWritesSilence(t *testing.T) {
+	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	require.NoError(t, err)
+	serverAddr := srvConn.LocalAddr().(*net.UDPAddr)
+
+	const pcmuPT = uint8(0)
+	rec, err := newRTPRecorder(srvConn, t.TempDir(), "callPause", "1", "2", time.Now().UnixMilli(), "inbound", pcmuPT, 0, testLogger())
+	require.NoError(t, err)
+	sink := &memorySink{}
+	if old := rec.ReplaceSink(sink); old != nil {
+		require.NoError(t, old.Close())
+	}
+	go rec.run()
+	defer rec.Close()
+
+	client, err := net.DialUDP("udp", nil, serverAddr)
+	require.NoError(t, err)
+	defer client.Close()
+
+	send := func(seq uint16, payload []byte, wantWrites int) {
+		t.Helper()
+		_, err := client.Write(rtpPacket(pcmuPT, seq, payload))
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			sink.mu.Lock()
+			defer sink.mu.Unlock()
+			return len(sink.writes) == wantWrites
+		}, time.Second, 5*time.Millisecond)
+	}
+
+	send(1, []byte("real"), 1)
+	rec.SetPaused(true)
+	send(2, []byte("secret"), 2)
+	send(3, []byte("card#"), 3)
+	rec.SetPaused(false)
+	send(4, []byte("back"), 4)
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	assert.Equal(t, [][]byte{
+		[]byte("real"),
+		bytes.Repeat([]byte{0xFF}, len("secret")),
+		bytes.Repeat([]byte{0xFF}, len("card#")),
+		[]byte("back"),
+	}, sink.writes)
+}
+
 func TestSanitizeFileComponent(t *testing.T) {
 	assert.Equal(t, "a_b_c", sanitizeFileComponent("a/b:c"))
 	assert.Equal(t, "unknown", sanitizeFileComponent(""))

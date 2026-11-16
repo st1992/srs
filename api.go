@@ -32,6 +32,8 @@ func NewAPIServer(cfg *Config, recorder *recorderServer, log *slog.Logger) *apiS
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", api.handleHealth)
 	mux.HandleFunc("/v1/recording/split", api.handleSplitRecording)
+	mux.HandleFunc("/v1/recording/pause", api.handlePauseRecording)
+	mux.HandleFunc("/v1/recording/resume", api.handleResumeRecording)
 	mux.HandleFunc("/v1/agent-assist/start", api.handleStartAgentAssist)
 	mux.HandleFunc("/v1/agent-assist/stop", api.handleStopAgentAssist)
 	api.server = &http.Server{
@@ -184,6 +186,54 @@ func (a *apiServer) handleStopAgentAssist(w http.ResponseWriter, r *http.Request
 		CallID:                    result.CallID,
 		AgentAssistConversationID: result.ConversationID,
 		State:                     string(result.State),
+	})
+}
+
+type pauseRecordingRequest struct {
+	CallID string `json:"call_id"`
+}
+
+type pauseRecordingResponse struct {
+	CallID string `json:"call_id"`
+	State  string `json:"state"`
+	Paused bool   `json:"paused"`
+}
+
+// handlePauseRecording makes a call's legs write silence in place of the
+// call audio. See recorderServer.PauseRecording.
+func (a *apiServer) handlePauseRecording(w http.ResponseWriter, r *http.Request) {
+	a.handleSetPaused(w, r, a.recorder.PauseRecording)
+}
+
+// handleResumeRecording switches a paused call's legs back to the call
+// audio. See recorderServer.ResumeRecording.
+func (a *apiServer) handleResumeRecording(w http.ResponseWriter, r *http.Request) {
+	a.handleSetPaused(w, r, a.recorder.ResumeRecording)
+}
+
+func (a *apiServer) handleSetPaused(w http.ResponseWriter, r *http.Request, set func(context.Context, string) (*pauseResult, error)) {
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req pauseRecordingRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.CallID) == "" {
+		writeAPIError(w, http.StatusBadRequest, "call_id is required")
+		return
+	}
+	result, err := set(r.Context(), req.CallID)
+	if err != nil {
+		a.writeCallError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, pauseRecordingResponse{
+		CallID: result.CallID,
+		State:  string(result.State),
+		Paused: result.Paused,
 	})
 }
 
