@@ -46,7 +46,7 @@ func TestConcurrent_SplitRaceWithFinalize_NoOrphanedSegment(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			srv.finalizeSession(sess, time.Now().UTC().Format(time.RFC3339Nano), nil, "bye")
+			srv.finalizeSession(context.Background(), sess, time.Now().UTC().Format(time.RFC3339Nano), nil, "bye")
 		}()
 		close(start)
 		wg.Wait()
@@ -92,7 +92,7 @@ func TestConcurrent_DirectRotateRaceWithFinalize_NoOrphanedSegment(t *testing.T)
 		go func() {
 			defer wg.Done()
 			<-start
-			srv.finalizeSession(sess, time.Now().UTC().Format(time.RFC3339Nano), nil, "bye")
+			srv.finalizeSession(context.Background(), sess, time.Now().UTC().Format(time.RFC3339Nano), nil, "bye")
 		}()
 		close(start)
 		wg.Wait()
@@ -217,7 +217,7 @@ func TestConcurrent_RTPDuringSplit(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // drain in-flight packets
 
 	// Finalize to close out the last segment and its files.
-	srv.finalizeSession(sess, time.Now().UTC().Format(time.RFC3339Nano), nil, "bye")
+	srv.finalizeSession(context.Background(), sess, time.Now().UTC().Format(time.RFC3339Nano), nil, "bye")
 
 	sess.mu.Lock()
 	segments := append([]*callSegment(nil), sess.CompletedSegments...)

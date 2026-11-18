@@ -47,12 +47,21 @@ log_level: "info"
 # of being negotiated (SBC never sent media). 0 disables the watchdog.
 rtp_no_media_timeout_sec: 5
 
-# Flag (log only, never terminate) any in-progress call older than this with
-# no BYE received — usually means an SBC crashed or dropped the BYE. 0
-# disables the check.
+# Flag any in-progress call older than this with no BYE received — usually
+# means an SBC crashed or dropped the BYE. 0 disables the check.
 max_call_duration_hours: 12
 
-# How often the session store is scanned for stale sessions.
+# Finalize such a stale call as if its BYE had arrived: close and upload the
+# recording and complete any Agent Assist conversation (so Google doesn't hold
+# it open until its 24h timeout). false = log only.
+finalize_stale_sessions: true
+
+# Finalize a call once every leg has received no RTP for this many seconds,
+# catching a lost BYE long before max_call_duration_hours. 0 disables. Only
+# enable if your SBC keeps sending RTP while a call is on hold.
+session_idle_timeout_sec: 0
+
+# How often the session store is scanned for stale/idle sessions.
 stale_session_check_interval_sec: 300
 
 # Pod-local HTTP API listen address for operational APIs such as the

@@ -48,6 +48,9 @@ type recorderServer struct {
 	sipContactPort int
 
 	reaperStop chan struct{}
+	// reaperWG tracks finalizations the reaper hands off to goroutines, so
+	// Stop (and tests) can wait for them.
+	reaperWG sync.WaitGroup
 
 	// locator registers this pod's address in Redis for each active call, so
 	// external systems can discover which pod owns a call and reach its HTTP
@@ -192,10 +195,11 @@ func (s *recorderServer) Start() error {
 	return nil
 }
 
-// staleSessionReaper periodically flags (logs only; never terminates)
-// sessions that have exceeded MaxCallDurationHours without a BYE — most
-// commonly caused by an SBC that crashed or dropped the in-dialog BYE,
-// leaving an open recording file and a leaked session behind.
+// staleSessionReaper periodically scans for sessions that never got a BYE --
+// most commonly an SBC that crashed or dropped the in-dialog BYE -- and
+// finalizes them (see reapOnce), so their recordings are uploaded and any
+// Agent Assist conversation is completed instead of being left open on
+// Google's side until its 24h timeout.
 func (s *recorderServer) staleSessionReaper() {
 	defer recoverAndLog(s.log, "staleSessionReaper")
 
@@ -203,7 +207,11 @@ func (s *recorderServer) staleSessionReaper() {
 	if interval <= 0 {
 		interval = 300 * time.Second
 	}
-	maxAge := time.Duration(s.cfg.MaxCallDurationHours) * time.Hour
+	// Check often enough that idle detection isn't delayed by up to a full
+	// (default 5 minute) scan interval past its timeout.
+	if idle := time.Duration(s.cfg.SessionIdleTimeoutSec) * time.Second; idle > 0 {
+		interval = min(interval, max(idle/2, time.Second))
+	}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -213,20 +221,76 @@ func (s *recorderServer) staleSessionReaper() {
 		case <-s.reaperStop:
 			return
 		case <-ticker.C:
-			now := time.Now()
-			for _, sess := range s.sessions.Snapshot() {
-				age := now.Sub(sess.CreatedAt)
-				if age > maxAge {
-					s.log.Log(context.Background(), LevelCritical,
-						"session exceeded max call duration with no BYE; recording left open (flagged only, not terminated)",
-						"event", eventSessionStale,
-						"sipCallID", sess.CallID,
-						"age_hours", age.Hours(),
-					)
-				}
-			}
+			s.reapOnce(time.Now())
 		}
 	}
+}
+
+// reapOnce runs a single reaper pass as of now. A session older than
+// MaxCallDurationHours is logged as stale and, if FinalizeStaleSessions is
+// set, finalized; a session whose legs have all been without RTP for
+// SessionIdleTimeoutSec is finalized as idle. Each session is claimed (removed
+// from the store) synchronously, so a racing BYE or a later pass can't
+// finalize it twice, and then finalized on its own goroutine so one slow
+// CompleteConversation can't stall the scan.
+func (s *recorderServer) reapOnce(now time.Time) {
+	maxAge := time.Duration(s.cfg.MaxCallDurationHours) * time.Hour
+	idleTimeout := time.Duration(s.cfg.SessionIdleTimeoutSec) * time.Second
+
+	for _, sess := range s.sessions.Snapshot() {
+		reason := ""
+		age := now.Sub(sess.CreatedAt)
+		switch {
+		case maxAge > 0 && age > maxAge:
+			msg := "session exceeded max call duration with no BYE; recording left open (flagged only, not terminated)"
+			if s.cfg.FinalizeStaleSessions {
+				msg = "session exceeded max call duration with no BYE; finalizing"
+				reason = "stale"
+			}
+			s.log.Log(context.Background(), LevelCritical, msg,
+				"event", eventSessionStale,
+				"sipCallID", sess.CallID,
+				"age_hours", age.Hours(),
+			)
+		case idleTimeout > 0 && sessionIdle(sess, now, idleTimeout):
+			s.log.Warn("session received no RTP on any leg past idle timeout with no BYE; finalizing",
+				"event", eventSessionIdle,
+				"sipCallID", sess.CallID,
+				"idle_timeout_sec", s.cfg.SessionIdleTimeoutSec,
+				"age_sec", age.Seconds(),
+			)
+			reason = "idle"
+		}
+		if reason == "" {
+			continue
+		}
+
+		claimed, ok := s.claimSession(sess.CallID)
+		if !ok {
+			continue // a BYE got there first
+		}
+		endTimeISO := now.UTC().Format(time.RFC3339Nano)
+		s.reaperWG.Add(1)
+		go func() {
+			defer s.reaperWG.Done()
+			defer recoverAndLog(s.log, "reaperFinalize")
+			s.finalizeSession(context.Background(), claimed, endTimeISO, nil, reason)
+		}()
+	}
+}
+
+// sessionIdle reports whether every leg of sess has gone at least timeout
+// without receiving RTP. A session with no legs is never idle.
+func sessionIdle(sess *recSession, now time.Time, timeout time.Duration) bool {
+	if len(sess.Legs) == 0 {
+		return false
+	}
+	for _, leg := range sess.Legs {
+		if leg.IdleFor(now) < timeout {
+			return false
+		}
+	}
+	return true
 }
 
 // Stop closes the SIP listener, finalizes all recordings, and drains uploads.
@@ -241,18 +305,31 @@ func (s *recorderServer) Stop() {
 		_ = s.listener.Close()
 	}
 
+	// Finalize every call in parallel (bounded), under one shared deadline,
+	// so each Agent Assist conversation gets its CompleteConversation sent
+	// before the pod's termination grace period runs out -- done serially,
+	// a handful of calls could exhaust it and SIGKILL would orphan the rest
+	// on Google's side for 24h.
 	shutdownTime := time.Now().UTC().Format(time.RFC3339Nano)
+	finalizeCtx, finalizeCancel := context.WithTimeout(context.Background(), shutdownFinalizeTimeout)
+	defer finalizeCancel()
+	sem := make(chan struct{}, shutdownFinalizeConcurrency)
+	var wg sync.WaitGroup
 	for _, sess := range s.sessions.DrainAll() {
-		if s.locatorEnabled {
-			s.stopLocatorRenewal(sess.CallID)
-			locatorCtx, locatorCancel := s.locatorContext()
-			if err := s.locator.Delete(locatorCtx, sess.CallID); err != nil {
-				s.log.Warn("failed to delete call locator on shutdown", "err", err, "sipCallID", sess.CallID)
-			}
-			locatorCancel()
-		}
-		s.finalizeSession(sess, shutdownTime, nil, "shutdown")
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer recoverAndLog(s.log, "shutdownFinalize")
+			s.releaseLocator(sess.CallID)
+			s.finalizeSession(finalizeCtx, sess, shutdownTime, nil, "shutdown")
+		}()
 	}
+	wg.Wait()
+	// Sessions the reaper had already claimed are no longer in the store;
+	// wait for their finalization too (bounded by its own retry budget).
+	s.reaperWG.Wait()
 
 	timeout := time.Duration(s.cfg.ShutdownUploadTimeoutSec) * time.Second
 	if timeout <= 0 {
@@ -262,6 +339,40 @@ func (s *recorderServer) Stop() {
 	defer cancel()
 	s.uploader.Shutdown(ctx)
 	s.metaUploader.Shutdown(ctx)
+}
+
+// shutdownFinalizeTimeout caps how long shutdown spends finalizing calls
+// (chiefly retrying CompleteConversation), leaving the rest of the pod's 60s
+// termination grace period for draining uploads.
+var shutdownFinalizeTimeout = 20 * time.Second
+
+// shutdownFinalizeConcurrency bounds how many calls shutdown finalizes at once.
+const shutdownFinalizeConcurrency = 32
+
+// claimSession removes callID from the session store and releases its
+// locator entry, returning the session if this caller was the one to remove
+// it. Whoever claims a session (BYE, reaper) is the one that finalizes it.
+func (s *recorderServer) claimSession(callID string) (*recSession, bool) {
+	sess, ok := s.sessions.Delete(callID)
+	if !ok {
+		return nil, false
+	}
+	s.releaseLocator(callID)
+	return sess, true
+}
+
+// releaseLocator stops renewing and deletes callID's locator entry, if the
+// locator is enabled.
+func (s *recorderServer) releaseLocator(callID string) {
+	if !s.locatorEnabled {
+		return
+	}
+	s.stopLocatorRenewal(callID)
+	locatorCtx, locatorCancel := s.locatorContext()
+	defer locatorCancel()
+	if err := s.locator.Delete(locatorCtx, callID); err != nil {
+		s.log.Warn("failed to delete call locator", "err", err, "sipCallID", callID)
+	}
 }
 
 // onInvite handles incoming INVITEs, accepting only SIPREC INVITEs.
@@ -565,18 +676,17 @@ func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTr
 	callID := callIDValue(req)
 	s.respond(tx, req, sip.StatusOK, "OK", nil)
 
-	sess, ok := s.sessions.Delete(callID)
+	sess, ok := s.claimSession(callID)
 	if !ok {
+		// Either a duplicate BYE, one for a call the reaper already
+		// finalized, or one routed to a pod that doesn't own the call -- in
+		// which case the owning pod never finalizes it (nor completes its
+		// Agent Assist conversation) until the reaper catches it.
+		s.log.Warn("received BYE for unknown SIPREC session",
+			"event", eventByeUnknownSession,
+			"sipCallID", callID,
+		)
 		return
-	}
-
-	if s.locatorEnabled {
-		s.stopLocatorRenewal(callID)
-		locatorCtx, locatorCancel := s.locatorContext()
-		if err := s.locator.Delete(locatorCtx, callID); err != nil {
-			s.log.Warn("failed to delete call locator", "err", err, "sipCallID", callID)
-		}
-		locatorCancel()
 	}
 
 	// Parse rs-metadata from the BYE body (best effort; carries disassociate-time).
@@ -599,7 +709,7 @@ func (s *recorderServer) onBye(_ *slog.Logger, req *sip.Request, tx sip.ServerTr
 
 	// Closes out the current segment, writes/enqueues its metadata JSON, and
 	// enqueues its recording files for upload.
-	s.finalizeSession(sess, endTimeISO, byeMeta, "bye")
+	s.finalizeSession(context.Background(), sess, endTimeISO, byeMeta, "bye")
 }
 
 // onOptions answers OPTIONS pings.
@@ -747,8 +857,10 @@ func (s *recorderServer) rotateSegment(sess *recSession, now time.Time, reason s
 
 // finalizeSession closes out the call's current (and final) segment,
 // writes/enqueues its metadata JSON, and enqueues its recording files for
-// upload. Used by both onBye and Stop (shutdown).
-func (s *recorderServer) finalizeSession(sess *recSession, endTimeISO string, byeMeta *SiprecMetadata, reason string) {
+// upload, completing the call's Agent Assist conversation if one is still
+// open. Used by onBye, the reaper, and Stop (shutdown). ctx bounds the
+// CompleteConversation retries and must not be request-scoped.
+func (s *recorderServer) finalizeSession(ctx context.Context, sess *recSession, endTimeISO string, byeMeta *SiprecMetadata, reason string) {
 	endTime, err := time.Parse(time.RFC3339Nano, endTimeISO)
 	if err != nil {
 		endTime = time.Now().UTC()
@@ -758,11 +870,7 @@ func (s *recorderServer) finalizeSession(sess *recSession, endTimeISO string, by
 	for _, leg := range legs {
 		leg.Close()
 	}
-	if agentAssistRun != nil {
-		if err := agentAssistRun.complete(context.Background()); err != nil {
-			s.log.Error("failed to complete agent assist conversation on finalize", "err", err, "sipCallID", sess.CallID, "conversationID", agentAssistRun.ConversationID)
-		}
-	}
+	s.completeAgentAssist(ctx, agentAssistRun, sess.CallID, reason)
 
 	if completed == nil {
 		return
@@ -781,6 +889,32 @@ func (s *recorderServer) finalizeSession(sess *recSession, endTimeISO string, by
 // =============================================================================
 // Agent Assist
 // =============================================================================
+
+// completeAgentAssist closes run's sinks and completes its Dialogflow
+// conversation, logging the outcome either way so every conversation's
+// CompleteConversation is traceable by conversationID (Google's Insights
+// export waits on it). A nil run is a no-op. ctx must not be cancellable by
+// anything tied to a request; it may carry a deadline.
+func (s *recorderServer) completeAgentAssist(ctx context.Context, run *agentAssistRun, callID, reason string) {
+	if run == nil {
+		return
+	}
+	started := time.Now()
+	err := run.complete(ctx)
+	attrs := []any{
+		"sipCallID", callID,
+		"conversationID", run.ConversationID,
+		"reason", reason,
+		"duration_ms", time.Since(started).Milliseconds(),
+	}
+	if err != nil {
+		s.log.Error("failed to complete agent assist conversation",
+			append([]any{"event", eventAgentAssistCompleteFailed, "err", err}, attrs...)...)
+		return
+	}
+	s.log.Info("completed agent assist conversation",
+		append([]any{"event", eventAgentAssistCompleted}, attrs...)...)
+}
 
 // agentAssistResult summarizes the outcome of a StartAgentAssist or
 // StopAgentAssist call: the call's Agent Assist conversation (if any) and
@@ -846,20 +980,20 @@ func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, me
 	sess.mu.Lock()
 	if sess.closed {
 		sess.mu.Unlock()
-		_ = run.complete(context.Background())
+		s.completeAgentAssist(context.Background(), run, callID, "start_race_closed")
 		return nil, errCallClosed
 	}
 	if sess.Mode != sessionModeRecording {
 		state := sess.Mode
 		sess.mu.Unlock()
-		_ = run.complete(context.Background())
+		s.completeAgentAssist(context.Background(), run, callID, "start_race_state")
 		return nil, fmt.Errorf("%w: cannot start agent assist from state %s", errInvalidTransition, state)
 	}
 	for _, leg := range sess.Legs {
 		next, ok := run.Sinks[leg.label]
 		if !ok {
 			sess.mu.Unlock()
-			_ = run.complete(context.Background())
+			s.completeAgentAssist(context.Background(), run, callID, "start_missing_label")
 			return nil, fmt.Errorf("agent assist stream missing for label %s", leg.label)
 		}
 		oldSinks = append(oldSinks, leg.ReplaceSink(next))
@@ -988,9 +1122,12 @@ func (s *recorderServer) stopAgentAssist(ctx context.Context, callID, reason, er
 	for _, sink := range newSinks {
 		s.uploader.MarkActive(sink.Path())
 	}
-	if err := run.complete(ctx); err != nil {
-		s.log.Error("failed to complete agent assist conversation", "err", err, "sipCallID", callID, "conversationID", run.ConversationID)
-	}
+	// ctx is typically the HTTP request's, which is cancelled the moment the
+	// client gives up or disconnects -- possibly while the sinks above were
+	// still closing. sess.AgentAssist is already cleared, so nothing would
+	// retry a Complete that failed on a cancelled ctx: the conversation would
+	// sit open on Google's side until its 24h timeout. Detach from it.
+	s.completeAgentAssist(context.WithoutCancel(ctx), run, callID, reason)
 	if completed != nil {
 		if metaPath, err := s.writeSegmentMetadataJSON(sess, completed, nil, nil); err != nil {
 			s.log.Error("failed to write agent-assist metadata JSON", "err", err, "sipCallID", callID)

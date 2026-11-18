@@ -48,6 +48,8 @@ data:
     rtp_no_media_timeout_sec:         {{ $root.Values.recorder.config.rtpNoMediaTimeoutSec | default 5 }}
     max_call_duration_hours:          {{ $root.Values.recorder.config.maxCallDurationHours | default 12 }}
     stale_session_check_interval_sec: {{ $root.Values.recorder.config.staleSessionCheckIntervalSec | default 300 }}
+    finalize_stale_sessions:          {{ $root.Values.recorder.config.finalizeStaleSessions }}
+    session_idle_timeout_sec:         {{ $root.Values.recorder.config.sessionIdleTimeoutSec | default 0 }}
 
     # Pod-local HTTP API (recording-split endpoint). Bound to the node's
     # network namespace (hostNetwork), so this port is per-instance.

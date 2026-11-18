@@ -94,6 +94,12 @@ recorder:
     rtpNoMediaTimeoutSec: 5
     maxCallDurationHours: 12
     staleSessionCheckIntervalSec: 300
+    # Finalize (close, upload, complete Agent Assist) sessions older than
+    # maxCallDurationHours instead of only logging them.
+    finalizeStaleSessions: true
+    # Finalize a session after this many seconds with no RTP on any leg.
+    # 0 disables. Only enable if the SBC keeps sending RTP during hold.
+    sessionIdleTimeoutSec: 0
 
     # Redis registers "loc:<Call-ID>" -> "<node-ip>:<httpPort>" for the
     # lifetime of each call, so an external system can discover which

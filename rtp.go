@@ -129,7 +129,10 @@ type rtpRecorder struct {
 	bytes   atomic.Uint64
 	dropped atomic.Uint64 // payloads a full sink (errSinkFull) couldn't take
 	paused  atomic.Bool   // write silence instead of the received audio
-	done    chan struct{}
+	// lastPacketAt is the unix-nano time the last PCMU packet arrived (or the
+	// recorder's creation time, before any has); see IdleFor.
+	lastPacketAt atomic.Int64
+	done         chan struct{}
 
 	lastDropLog time.Time // owned by run()
 
@@ -157,6 +160,7 @@ func newRTPRecorder(conn *net.UDPConn, recordingDir, callID, dnis, ani string, s
 		path:   sink.Path(),
 		done:   make(chan struct{}),
 	}
+	r.lastPacketAt.Store(time.Now().UnixNano())
 
 	if noMediaTimeoutSec > 0 {
 		r.noMediaTimer = time.AfterFunc(time.Duration(noMediaTimeoutSec)*time.Second, func() {
@@ -239,6 +243,7 @@ func (r *rtpRecorder) run() {
 		if pkt.PayloadType != r.pcmuPT {
 			continue
 		}
+		r.lastPacketAt.Store(time.Now().UnixNano())
 
 		r.mu.RLock()
 		sink := r.sink
@@ -270,6 +275,12 @@ func (r *rtpRecorder) run() {
 		r.packets.Add(1)
 		r.bytes.Add(uint64(len(pkt.Payload)))
 	}
+}
+
+// IdleFor reports how long it has been, as of now, since this leg last
+// received a PCMU packet (or since it was created, if it never has).
+func (r *rtpRecorder) IdleFor(now time.Time) time.Duration {
+	return now.Sub(time.Unix(0, r.lastPacketAt.Load()))
 }
 
 // noteDropped counts a payload dropped by a full sink, logging at most once

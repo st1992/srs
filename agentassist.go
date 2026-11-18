@@ -169,9 +169,14 @@ func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStar
 		for _, sink := range created {
 			_ = sink.Close()
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, _ = c.conversations.CompleteConversation(ctx, &dialogflowpb.CompleteConversationRequest{Name: conv.Name})
+		if err := c.completeConversation(context.Background(), conv.Name); err != nil {
+			c.log.Warn("failed to complete orphaned agent assist conversation after start failure",
+				"event", eventAgentAssistCompleteFailed,
+				"err", err,
+				"sipCallID", req.CallID,
+				"conversationID", conversationIDFromName(conv.Name),
+			)
+		}
 	}
 
 	for _, label := range req.Labels {
@@ -235,12 +240,82 @@ func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStar
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			defer cancel()
-			_, err := c.conversations.CompleteConversation(ctx, &dialogflowpb.CompleteConversationRequest{Name: conv.Name})
-			return err
+			return c.completeConversation(ctx, conv.Name)
 		},
 	}, nil
+}
+
+// completeConversation sends CompleteConversation for name, retrying
+// transient failures. Completing promptly is what lets Dialogflow close the
+// session, merge its audio, and export it to Insights; a conversation left
+// open sits until Google's 24h hard timeout.
+func (c *googleAgentAssistClient) completeConversation(ctx context.Context, name string) error {
+	return completeConversationWithRetry(ctx, func(ctx context.Context) error {
+		_, err := c.conversations.CompleteConversation(ctx, &dialogflowpb.CompleteConversationRequest{Name: name})
+		return err
+	})
+}
+
+// Retry budget for CompleteConversation: 3 attempts of up to 10s each with
+// 500ms then 2s between them, ~32.5s worst case. Variables so tests can
+// shrink them.
+var (
+	completeConversationAttempts       = 3
+	completeConversationAttemptTimeout = 10 * time.Second
+	completeConversationBackoff        = []time.Duration{500 * time.Millisecond, 2 * time.Second}
+)
+
+// completeConversationWithRetry runs call up to completeConversationAttempts
+// times, each under its own completeConversationAttemptTimeout, retrying only
+// errors retryableCompleteError deems transient. It gives up as soon as ctx
+// is done, so callers bound the whole budget with ctx's deadline (shutdown)
+// and must not hand it a request-scoped ctx that can be cancelled early.
+func completeConversationWithRetry(ctx context.Context, call func(context.Context) error) error {
+	var err error
+	for attempt := 0; attempt < completeConversationAttempts; attempt++ {
+		if attempt > 0 {
+			wait := completeConversationBackoff[len(completeConversationBackoff)-1]
+			if attempt-1 < len(completeConversationBackoff) {
+				wait = completeConversationBackoff[attempt-1]
+			}
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return errors.Join(err, ctx.Err())
+			case <-timer.C:
+			}
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, completeConversationAttemptTimeout)
+		err = call(attemptCtx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return errors.Join(err, ctx.Err())
+		}
+		if !retryableCompleteError(err) {
+			return err
+		}
+	}
+	return err
+}
+
+// retryableCompleteError reports whether a CompleteConversation failure is
+// worth retrying. A per-attempt timeout surfaces as DeadlineExceeded (or a
+// bare context.DeadlineExceeded) and is retried; the caller has already
+// checked that the parent ctx is still alive.
+func retryableCompleteError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	switch status.Code(err) {
+	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted, codes.Aborted, codes.Internal:
+		return true
+	default:
+		return false
+	}
 }
 
 // location is the region the conversation and its participants are created in.

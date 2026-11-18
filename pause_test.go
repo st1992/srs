@@ -142,7 +142,7 @@ func TestPause_FinalizeClosesOpenInterval(t *testing.T) {
 
 	_, err := srv.PauseRecording(context.Background(), "call-1")
 	require.NoError(t, err)
-	srv.finalizeSession(sess, sess.StartTime, nil, "bye")
+	srv.finalizeSession(context.Background(), sess, sess.StartTime, nil, "bye")
 
 	require.NotEmpty(t, sess.CompletedSegments)
 	last := sess.CompletedSegments[len(sess.CompletedSegments)-1]

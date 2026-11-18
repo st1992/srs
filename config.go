@@ -73,10 +73,22 @@ type Config struct {
 	// Defaults to 5 seconds.
 	RTPNoMediaTimeoutSec int `yaml:"rtp_no_media_timeout_sec"`
 
-	// MaxCallDurationHours flags (logs only; does not terminate) any
-	// in-progress session older than this as stale, e.g. a BYE that was
-	// lost when an SBC crashed. <= 0 disables the check. Defaults to 12.
+	// MaxCallDurationHours flags any in-progress session older than this as
+	// stale, e.g. a BYE that was lost when an SBC crashed, and -- when
+	// FinalizeStaleSessions is set -- finalizes it as if a BYE had arrived.
+	// <= 0 disables the check. Defaults to 12.
 	MaxCallDurationHours int `yaml:"max_call_duration_hours"`
+
+	// FinalizeStaleSessions makes the stale-session reaper finalize (close,
+	// upload, and complete any Agent Assist conversation for) a session past
+	// MaxCallDurationHours instead of only logging it. Defaults to true.
+	FinalizeStaleSessions bool `yaml:"finalize_stale_sessions"`
+
+	// SessionIdleTimeoutSec finalizes a session once every one of its legs
+	// has received no RTP for this long, covering a lost BYE much sooner than
+	// MaxCallDurationHours. Only enable it if the SBC keeps sending RTP while
+	// a call is on hold. <= 0 disables it. Defaults to 0.
+	SessionIdleTimeoutSec int `yaml:"session_idle_timeout_sec"`
 
 	// StaleSessionCheckIntervalSec controls how often the session store is
 	// scanned for stale sessions. Defaults to 300 seconds.
@@ -141,6 +153,7 @@ func DefaultConfig() Config {
 		LogLevel:                     "info",
 		RTPNoMediaTimeoutSec:         5,
 		MaxCallDurationHours:         12,
+		FinalizeStaleSessions:        true,
 		StaleSessionCheckIntervalSec: 300,
 		HTTPListenAddr:               "0.0.0.0:8080",
 		RedisLocatorTTLSeconds:       3600,

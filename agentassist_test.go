@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -50,6 +51,13 @@ type fakeAgentAssistClient struct {
 	completes      int
 	startErr       error
 	conversationID string
+
+	// completeErr, if set, is returned by Complete; completeDelay makes
+	// Complete sleep first. completeCtxErrs records ctx.Err() as seen by
+	// each Complete call.
+	completeErr     error
+	completeDelay   time.Duration
+	completeCtxErrs []error
 }
 
 func (c *fakeAgentAssistClient) Start(_ context.Context, req AgentAssistStartRequest) (*agentAssistRun, error) {
@@ -70,11 +78,18 @@ func (c *fakeAgentAssistClient) Start(_ context.Context, req AgentAssistStartReq
 	return &agentAssistRun{
 		ConversationID: conv,
 		Sinks:          sinks,
-		Complete: func(context.Context) error {
+		Complete: func(ctx context.Context) error {
+			c.mu.Lock()
+			delay, err := c.completeDelay, c.completeErr
+			c.mu.Unlock()
+			if delay > 0 {
+				time.Sleep(delay)
+			}
 			c.mu.Lock()
 			c.completes++
+			c.completeCtxErrs = append(c.completeCtxErrs, ctx.Err())
 			c.mu.Unlock()
-			return nil
+			return err
 		},
 	}, nil
 }
@@ -256,7 +271,7 @@ func TestFinalizeSession_CompletesInProgressAgentAssistConversation(t *testing.T
 	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
 	require.NoError(t, err)
 
-	srv.finalizeSession(sess, "2026-01-01T00:00:00Z", nil, "bye")
+	srv.finalizeSession(context.Background(), sess, "2026-01-01T00:00:00Z", nil, "bye")
 	assert.Equal(t, 1, fake.completions(), "finalizing a call still in agent assist mode must complete its Dialogflow conversation")
 }
 

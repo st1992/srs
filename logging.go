@@ -113,6 +113,11 @@ const (
 	eventLocatorRegisterFailed = "locator_register_failed"
 	eventAgentAssistStarted    = "agent_assist_started"
 	eventAgentAssistStopped    = "agent_assist_stopped"
+
+	eventAgentAssistCompleted      = "agent_assist_completed"
+	eventAgentAssistCompleteFailed = "agent_assist_complete_failed"
+	eventSessionIdle               = "session_idle"
+	eventByeUnknownSession         = "bye_unknown_session"
 )
 
 // recoverAndLog is deferred at the top of goroutines/handlers this process

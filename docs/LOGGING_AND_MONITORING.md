@@ -80,7 +80,11 @@ thinking to update an alert). Full catalog, in rough call-flow order:
 | `port_exhausted` | ERROR | No free RTP port in configured range | `err` | `server.go` onInvite |
 | `recording_stalled` | **CRITICAL** | A leg's RTP read/write died while the call may still be active — silent audio loss | `err`, `label`, `file` | `rtp.go` run() |
 | `no_rtp_received` | WARNING | Leg negotiated media but got zero packets within `rtp_no_media_timeout_sec` | `timeout_sec`, `label`, `file` | `rtp.go` watchdog |
-| `session_stale` | **CRITICAL** | Session open longer than `max_call_duration_hours` with no BYE (leaked session / lost BYE) — flagged only, never auto-terminated | `sipCallID`, `age_hours` | `server.go` staleSessionReaper |
+| `session_stale` | **CRITICAL** | Session open longer than `max_call_duration_hours` with no BYE (leaked session / lost BYE). Finalized as if a BYE arrived (recording uploaded, Agent Assist conversation completed) when `finalize_stale_sessions` is true (default); flagged only otherwise | `sipCallID`, `age_hours` | `server.go` reapOnce |
+| `session_idle` | WARNING | Every leg of a session received no RTP for `session_idle_timeout_sec` with no BYE; session finalized. Only when `session_idle_timeout_sec > 0` | `sipCallID`, `idle_timeout_sec`, `age_sec` | `server.go` reapOnce |
+| `bye_unknown_session` | WARNING | BYE for a Call-ID this pod has no session for: a duplicate, one already finalized by the reaper, or one **routed to the wrong pod** (the owning pod then never finalizes the call until the reaper does) | `sipCallID` | `server.go` onBye |
+| `agent_assist_completed` | INFO | `CompleteConversation` succeeded — Google can close the session, merge audio and export to Insights. One per Agent Assist conversation | `sipCallID`, `conversationID`, `reason` ∈ `bye`, `shutdown`, `stale`, `idle`, `agent_assist_stop`, `agent_assist_error`, `start_race_*`, `start_missing_label`; `duration_ms` | `server.go` completeAgentAssist |
+| `agent_assist_complete_failed` | ERROR | `CompleteConversation` failed after retries (3 attempts on transient gRPC errors) — the conversation stays open on Google's side until its 24h timeout, delaying Insights export | same as above plus `err` | `server.go` completeAgentAssist, `agentassist.go` Start cleanup |
 | `panic_recovered` | **CRITICAL** | A goroutine/handler panicked and was recovered instead of crashing the process | `source`, `panic`, `stack` | `logging.go` recoverAndLog (wraps onInvite/onAck/onBye/onOptions and the RTP goroutine) |
 | `upload_succeeded` | INFO | File uploaded to GCS | `attempt`, `file`, `object` | `gcs.go` process() |
 | `upload_failed` | WARNING | One upload attempt failed, will retry | `attempt`, `err` | `gcs.go` process() |
@@ -98,7 +102,9 @@ All in `config.go` / `config.example.yaml` / `helm/values.yaml`
 | `LogLevel` | `log_level` | `info` | Minimum severity emitted (§2) |
 | `RTPNoMediaTimeoutSec` | `rtp_no_media_timeout_sec` | `5` | Grace period before `no_rtp_received`; `<=0` disables |
 | `MaxCallDurationHours` | `max_call_duration_hours` | `12` | Age threshold for `session_stale`; `<=0` disables |
-| `StaleSessionCheckIntervalSec` | `stale_session_check_interval_sec` | `300` | How often the reaper scans for stale sessions |
+| `FinalizeStaleSessions` | `finalize_stale_sessions` | `true` | Finalize sessions past `max_call_duration_hours` instead of only logging `session_stale` |
+| `SessionIdleTimeoutSec` | `session_idle_timeout_sec` | `0` | Finalize a session after this long with no RTP on any leg (`session_idle`); `<=0` disables. Only enable if the SBC sends RTP during hold |
+| `StaleSessionCheckIntervalSec` | `stale_session_check_interval_sec` | `300` | How often the reaper scans for stale/idle sessions (clamped to `session_idle_timeout_sec / 2` when idle detection is on) |
 
 License check target and interval are **not** config-driven (hardcoded in
 `main.go`): BigQuery resource `div-aais-cx-store-usc1-dev.gcp_license_dataset.gcp-license`,
