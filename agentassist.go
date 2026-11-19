@@ -148,6 +148,11 @@ func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStar
 	parent := fmt.Sprintf("projects/%s/locations/%s", c.cfg.AgentAssistProjectID, c.location())
 	profile := fmt.Sprintf("%s/conversationProfiles/%s", parent, c.cfg.AgentAssistConversationProfileID)
 
+	params, err := metadataStruct(req.Metadata)
+	if err != nil {
+		return nil, fmt.Errorf("convert agent assist metadata: %w", err)
+	}
+
 	conv, err := c.conversations.CreateConversation(ctx, &dialogflowpb.CreateConversationRequest{
 		Parent: parent,
 		Conversation: &dialogflowpb.Conversation{
@@ -156,11 +161,6 @@ func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStar
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create agent assist conversation: %w", err)
-	}
-
-	params, err := metadataStruct(req.Metadata)
-	if err != nil {
-		return nil, fmt.Errorf("convert agent assist metadata: %w", err)
 	}
 
 	sinks := make(map[string]rtpSink, len(req.Labels))

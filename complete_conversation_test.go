@@ -251,3 +251,25 @@ func TestCompleteAgentAssist_LogsFailureWithoutPanicking(t *testing.T) {
 	// nil run is a no-op.
 	srv.completeAgentAssist(context.Background(), nil, "call-1", "test")
 }
+
+// TestGoogleStart_InvalidMetadataFailsBeforeCreatingConversation guards the
+// ordering in googleAgentAssistClient.Start: metadata that can't be converted
+// must be rejected before CreateConversation, since a conversation created
+// and then abandoned on that error was never completed and sat open on
+// Google's side until its 24h timeout. The Dialogflow clients are nil here,
+// so reaching CreateConversation at all would panic.
+func TestGoogleStart_InvalidMetadataFailsBeforeCreatingConversation(t *testing.T) {
+	c := &googleAgentAssistClient{cfg: &Config{AgentAssistProjectID: "p", AgentAssistConversationProfileID: "prof"}, log: testLogger()}
+
+	var run *agentAssistRun
+	var err error
+	require.NotPanics(t, func() {
+		run, err = c.Start(context.Background(), AgentAssistStartRequest{
+			CallID:   "call-1",
+			Labels:   []string{"inbound", "outbound"},
+			Metadata: map[string]any{"bad": make(chan int)}, // not representable as a structpb value
+		})
+	}, "Start must not reach CreateConversation with invalid metadata")
+	assert.Nil(t, run)
+	assert.ErrorContains(t, err, "convert agent assist metadata")
+}
