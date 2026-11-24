@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,7 +34,44 @@ type AgentAssistStartRequest struct {
 	CallID        string
 	Metadata      map[string]any
 	Labels        []string
+	Target        agentAssistTarget
 	OnStreamError func(error)
+}
+
+// agentAssistTarget selects the conversation profile, and the region it lives
+// in, for one conversation. The zero value means the configured default.
+type agentAssistTarget struct {
+	ProfileID string
+	Location  string
+}
+
+var (
+	// agentAssistRegionPattern only admits a DNS label fragment: the region is
+	// interpolated into the host that GCP credentials are sent to (see
+	// dialogflowEndpoint), so a caller must not be able to smuggle in a dot,
+	// slash or port. 52 characters keeps "<region>-dialogflow" a legal label.
+	agentAssistRegionPattern  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,50}[a-z0-9])?$`)
+	agentAssistProfilePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+)
+
+// parseAgentAssistTarget validates a request's optional profile and region.
+// A profile only exists in its own region, so the two are used as a pair or
+// not at all: if either is blank the zero target (configured default) is
+// returned, with ignoredLone set when the other one was supplied.
+func parseAgentAssistTarget(profileID, region string) (target agentAssistTarget, ignoredLone bool, err error) {
+	profileID = strings.TrimSpace(profileID)
+	region = strings.TrimSpace(region)
+	if profileID == "" || region == "" {
+		return agentAssistTarget{}, profileID != "" || region != "", nil
+	}
+	region = normalizeAgentAssistLocation(region)
+	if !agentAssistProfilePattern.MatchString(profileID) {
+		return agentAssistTarget{}, false, errors.New("aa_conversation_profile_id must be a bare profile ID (letters, digits, '-' or '_', at most 128 characters)")
+	}
+	if !agentAssistRegionPattern.MatchString(region) {
+		return agentAssistTarget{}, false, errors.New("aa_region must be a region ID such as global or us-central1")
+	}
+	return agentAssistTarget{ProfileID: profileID, Location: region}, false, nil
 }
 
 // disabledAgentAssistClient is used when Agent Assist isn't configured
@@ -52,10 +90,26 @@ func (c disabledAgentAssistClient) Close() error { return nil }
 // googleAgentAssistClient streams call audio to a Dialogflow conversation
 // profile via the ES Participants BidiStreamingAnalyzeContent API.
 type googleAgentAssistClient struct {
-	cfg           *Config
-	log           *slog.Logger
+	cfg *Config
+	log *slog.Logger
+
+	// newClients builds the clients for one location; a field so tests can
+	// point them at a local server.
+	newClients func(ctx context.Context, location string) (*dialogflowClients, error)
+
+	mu      sync.Mutex
+	clients map[string]*dialogflowClients // keyed by normalized location
+}
+
+// dialogflowClients are the Dialogflow clients connected to one location's
+// endpoint.
+type dialogflowClients struct {
 	conversations *dialogflow.ConversationsClient
 	participants  *dialogflow.ParticipantsClient
+}
+
+func (d *dialogflowClients) Close() error {
+	return errors.Join(d.participants.Close(), d.conversations.Close())
 }
 
 // normalizeAgentAssistLocation trims and lower-cases a configured
@@ -101,18 +155,46 @@ func NewAgentAssistClient(ctx context.Context, cfg *Config, log *slog.Logger) (A
 		return disabledAgentAssistClient{reason: "agent_assist_project_id and agent_assist_conversation_profile_id are required"}, nil
 	}
 
-	location := normalizeAgentAssistLocation(cfg.AgentAssistLocationID)
-	endpoint := dialogflowEndpoint(location)
+	c := &googleAgentAssistClient{cfg: cfg, log: log.With("component", "agent_assist")}
+	c.newClients = c.dialClients
+	// The default location's clients are built up front so bad credentials
+	// fail at startup; other locations' are built when first requested.
+	if _, err := c.clientsFor(ctx, c.resolveTarget(agentAssistTarget{}).Location); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
 
-	log = log.With("component", "agent_assist")
+// clientsFor returns the clients for a normalized location, building them on
+// first use. Construction doesn't connect, so holding mu across it is brief;
+// a failed construction isn't cached.
+func (c *googleAgentAssistClient) clientsFor(ctx context.Context, location string) (*dialogflowClients, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if clients, ok := c.clients[location]; ok {
+		return clients, nil
+	}
+	clients, err := c.newClients(ctx, location)
+	if err != nil {
+		return nil, err
+	}
+	if c.clients == nil {
+		c.clients = make(map[string]*dialogflowClients)
+	}
+	c.clients[location] = clients
+	return clients, nil
+}
+
+func (c *googleAgentAssistClient) dialClients(ctx context.Context, location string) (*dialogflowClients, error) {
+	endpoint := dialogflowEndpoint(location)
 	// Logged before the clients are built so a construction failure still says
 	// which endpoint was attempted; the clients dial lazily, so a typo'd region
 	// otherwise stays invisible until the first /v1/agent-assist/start.
-	log.Info("agent assist dialogflow endpoint resolved", "location", location, "endpoint", endpoint)
+	c.log.Info("agent assist dialogflow endpoint resolved", "location", location, "endpoint", endpoint)
 
 	opts := []option.ClientOption{option.WithEndpoint(endpoint)}
-	if cfg.GCPCredentialsFile != "" {
-		opts = append(opts, option.WithCredentialsFile(cfg.GCPCredentialsFile))
+	if c.cfg.GCPCredentialsFile != "" {
+		opts = append(opts, option.WithCredentialsFile(c.cfg.GCPCredentialsFile))
 	}
 
 	conversations, err := dialogflow.NewConversationsClient(ctx, opts...)
@@ -124,44 +206,61 @@ func NewAgentAssistClient(ctx context.Context, cfg *Config, log *slog.Logger) (A
 		_ = conversations.Close()
 		return nil, fmt.Errorf("create participants client: %w", err)
 	}
-
-	return &googleAgentAssistClient{
-		cfg:           cfg,
-		log:           log,
-		conversations: conversations,
-		participants:  participants,
-	}, nil
+	return &dialogflowClients{conversations: conversations, participants: participants}, nil
 }
 
 func (c *googleAgentAssistClient) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	var err error
-	if c.participants != nil {
-		err = errors.Join(err, c.participants.Close())
-	}
-	if c.conversations != nil {
-		err = errors.Join(err, c.conversations.Close())
+	for _, clients := range c.clients {
+		err = errors.Join(err, clients.Close())
 	}
 	return err
 }
 
+// agentAssistSetupTimeout bounds the unary calls that set up a conversation.
+// The SDK retries Unavailable (which is what a nonexistent region's DNS
+// failure looks like) for up to 60s, past the HTTP API's 30s WriteTimeout.
+// Variable so tests can shrink it.
+var agentAssistSetupTimeout = 20 * time.Second
+
 func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStartRequest) (*agentAssistRun, error) {
-	parent := fmt.Sprintf("projects/%s/locations/%s", c.cfg.AgentAssistProjectID, c.location())
-	profile := fmt.Sprintf("%s/conversationProfiles/%s", parent, c.cfg.AgentAssistConversationProfileID)
+	target := c.resolveTarget(req.Target)
+	parent := fmt.Sprintf("projects/%s/locations/%s", c.cfg.AgentAssistProjectID, target.Location)
+	profile := fmt.Sprintf("%s/conversationProfiles/%s", parent, target.ProfileID)
 
 	params, err := metadataStruct(req.Metadata)
 	if err != nil {
 		return nil, fmt.Errorf("convert agent assist metadata: %w", err)
 	}
 
-	conv, err := c.conversations.CreateConversation(ctx, &dialogflowpb.CreateConversationRequest{
+	// Everything this conversation does, up to and including rotations and
+	// CompleteConversation, must go through its own region's clients. They're
+	// shared and outlive this request, hence not built on ctx.
+	clients, err := c.clientsFor(context.Background(), target.Location)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, agentAssistSetupTimeout)
+	defer cancel()
+
+	conv, err := clients.conversations.CreateConversation(ctx, &dialogflowpb.CreateConversationRequest{
 		Parent: parent,
 		Conversation: &dialogflowpb.Conversation{
 			ConversationProfile: profile,
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create agent assist conversation: %w", err)
+		return nil, fmt.Errorf("create agent assist conversation (profile %s, region %s): %w", target.ProfileID, target.Location, err)
 	}
+	c.log.Info("agent assist conversation created",
+		"sipCallID", req.CallID,
+		"conversationID", conversationIDFromName(conv.Name),
+		"profileID", target.ProfileID,
+		"location", target.Location,
+	)
 
 	sinks := make(map[string]rtpSink, len(req.Labels))
 	var created []*agentAssistSink
@@ -169,7 +268,7 @@ func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStar
 		for _, sink := range created {
 			_ = sink.Close()
 		}
-		if err := c.completeConversation(context.Background(), conv.Name); err != nil {
+		if err := c.completeConversation(context.Background(), clients, conv.Name); err != nil {
 			c.log.Warn("failed to complete orphaned agent assist conversation after start failure",
 				"event", eventAgentAssistCompleteFailed,
 				"err", err,
@@ -180,7 +279,7 @@ func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStar
 	}
 
 	for _, label := range req.Labels {
-		participant, err := c.participants.CreateParticipant(ctx, &dialogflowpb.CreateParticipantRequest{
+		participant, err := clients.participants.CreateParticipant(ctx, &dialogflowpb.CreateParticipantRequest{
 			Parent: conv.Name,
 			Participant: &dialogflowpb.Participant{
 				Role: c.roleForLabel(label),
@@ -203,7 +302,7 @@ func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStar
 		// sink rotates off it or is Close()'d instead. The sink calls open
 		// again for each rotation, reusing the same participant.
 		open := func() (bidiAnalyzeStream, error) {
-			stream, err := c.participants.BidiStreamingAnalyzeContent(context.Background())
+			stream, err := clients.participants.BidiStreamingAnalyzeContent(context.Background())
 			if err != nil {
 				return nil, fmt.Errorf("open bidi stream for %s: %w", label, err)
 			}
@@ -240,7 +339,7 @@ func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStar
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			return c.completeConversation(ctx, conv.Name)
+			return c.completeConversation(ctx, clients, conv.Name)
 		},
 	}, nil
 }
@@ -249,9 +348,9 @@ func (c *googleAgentAssistClient) Start(ctx context.Context, req AgentAssistStar
 // transient failures. Completing promptly is what lets Dialogflow close the
 // session, merge its audio, and export it to Insights; a conversation left
 // open sits until Google's 24h hard timeout.
-func (c *googleAgentAssistClient) completeConversation(ctx context.Context, name string) error {
+func (c *googleAgentAssistClient) completeConversation(ctx context.Context, clients *dialogflowClients, name string) error {
 	return completeConversationWithRetry(ctx, func(ctx context.Context) error {
-		_, err := c.conversations.CompleteConversation(ctx, &dialogflowpb.CompleteConversationRequest{Name: name})
+		_, err := clients.conversations.CompleteConversation(ctx, &dialogflowpb.CompleteConversationRequest{Name: name})
 		return err
 	})
 }
@@ -318,12 +417,18 @@ func retryableCompleteError(err error) bool {
 	}
 }
 
-// location is the region the conversation and its participants are created in.
-// It shares normalizeAgentAssistLocation with the endpoint derived in
-// NewAgentAssistClient so the resource name and the host it's sent to can't
-// drift apart.
-func (c *googleAgentAssistClient) location() string {
-	return normalizeAgentAssistLocation(c.cfg.AgentAssistLocationID)
+// resolveTarget fills a zero target from config. The resulting Location is
+// normalized and feeds both the resource name and, via clientsFor, the host
+// it's sent to, so the two can't drift apart.
+func (c *googleAgentAssistClient) resolveTarget(target agentAssistTarget) agentAssistTarget {
+	if target == (agentAssistTarget{}) {
+		target = agentAssistTarget{
+			ProfileID: c.cfg.AgentAssistConversationProfileID,
+			Location:  c.cfg.AgentAssistLocationID,
+		}
+	}
+	target.Location = normalizeAgentAssistLocation(target.Location)
+	return target
 }
 
 func (c *googleAgentAssistClient) roleForLabel(label string) dialogflowpb.Participant_Role {

@@ -119,7 +119,7 @@ func TestPause_PersistsAcrossAgentAssist(t *testing.T) {
 
 	_, err := srv.PauseRecording(context.Background(), "call-1")
 	require.NoError(t, err)
-	started, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	started, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	require.NoError(t, err)
 	assert.Equal(t, sessionModeAgentAssist, started.State)
 	assert.Equal(t, []bool{true, true}, legsPaused(sess))

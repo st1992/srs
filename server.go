@@ -931,7 +931,7 @@ type agentAssistResult struct {
 // SplitRecording/rotateSegment: same sink-swap-under-lock shape, same
 // segment/metadata bookkeeping, but swapping to agentAssistSinks (see
 // agentassist.go) instead of new fileSinks.
-func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, metadata map[string]any) (*agentAssistResult, error) {
+func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, metadata map[string]any, target agentAssistTarget) (*agentAssistResult, error) {
 	sess, ok := s.sessions.Get(callID)
 	if !ok {
 		sess, ok = s.sessions.GetByPrefix(callID)
@@ -967,6 +967,7 @@ func (s *recorderServer) StartAgentAssist(ctx context.Context, callID string, me
 		CallID:        callID,
 		Metadata:      metadata,
 		Labels:        labels,
+		Target:        target,
 		OnStreamError: func(err error) { s.fallbackFromAgentAssist(callID, err) },
 	})
 	if err != nil {

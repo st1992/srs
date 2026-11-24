@@ -50,6 +50,7 @@ type fakeAgentAssistClient struct {
 	starts         int
 	completes      int
 	startErr       error
+	lastReq        AgentAssistStartRequest
 	conversationID string
 
 	// completeErr, if set, is returned by Complete; completeDelay makes
@@ -67,6 +68,7 @@ func (c *fakeAgentAssistClient) Start(_ context.Context, req AgentAssistStartReq
 		return nil, c.startErr
 	}
 	c.starts++
+	c.lastReq = req
 	conv := c.conversationID
 	if conv == "" {
 		conv = "conv-123"
@@ -116,7 +118,7 @@ func newTestAgentAssistServer(t *testing.T) (*recorderServer, *recSession, *fake
 func TestStartAgentAssist_SwapsSinksAndClosesRecordingSegment(t *testing.T) {
 	srv, sess, fake := newTestAgentAssistServer(t)
 
-	result, err := srv.StartAgentAssist(context.Background(), "call-1", map[string]any{"ticket": "t1"})
+	result, err := srv.StartAgentAssist(context.Background(), "call-1", map[string]any{"ticket": "t1"}, agentAssistTarget{})
 	require.NoError(t, err)
 	assert.Equal(t, sessionModeAgentAssist, result.State)
 	assert.Equal(t, "conv-123", result.ConversationID)
@@ -147,17 +149,17 @@ func TestStartAgentAssist_SwapsSinksAndClosesRecordingSegment(t *testing.T) {
 
 func TestStartAgentAssist_CallNotFound(t *testing.T) {
 	srv, _, _ := newTestAgentAssistServer(t)
-	_, err := srv.StartAgentAssist(context.Background(), "does-not-exist", nil)
+	_, err := srv.StartAgentAssist(context.Background(), "does-not-exist", nil, agentAssistTarget{})
 	assert.ErrorIs(t, err, errCallNotFound)
 }
 
 func TestStartAgentAssist_IdempotentWhenAlreadyStarted(t *testing.T) {
 	srv, _, fake := newTestAgentAssistServer(t)
 
-	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	require.NoError(t, err)
 
-	result, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	result, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	require.NoError(t, err)
 	assert.Equal(t, sessionModeAgentAssist, result.State)
 	assert.Equal(t, 1, fake.starts, "a second start while already in agent assist mode must not open a new conversation")
@@ -167,7 +169,7 @@ func TestStartAgentAssist_CallAlreadyClosed(t *testing.T) {
 	srv, sess, _ := newTestAgentAssistServer(t)
 	sess.Close()
 
-	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	assert.ErrorIs(t, err, errCallClosed)
 }
 
@@ -175,7 +177,7 @@ func TestStartAgentAssist_PropagatesClientError(t *testing.T) {
 	srv, _, fake := newTestAgentAssistServer(t)
 	fake.startErr = errors.New("dialogflow unavailable")
 
-	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	assert.ErrorContains(t, err, "dialogflow unavailable")
 }
 
@@ -189,7 +191,7 @@ func TestStartAgentAssist_MatchesByCallIDPrefix(t *testing.T) {
 	fake := &fakeAgentAssistClient{}
 	srv.assist = fake
 
-	result, err := srv.StartAgentAssist(context.Background(), "12344555", nil)
+	result, err := srv.StartAgentAssist(context.Background(), "12344555", nil, agentAssistTarget{})
 	require.NoError(t, err)
 	assert.Equal(t, sess.CallID, result.CallID, "the result must carry the resolved full Call-ID, not the prefix the caller sent")
 	assert.Equal(t, sessionModeAgentAssist, result.State)
@@ -198,7 +200,7 @@ func TestStartAgentAssist_MatchesByCallIDPrefix(t *testing.T) {
 func TestStopAgentAssist_ResumesRecordingWithNewSegment(t *testing.T) {
 	srv, sess, fake := newTestAgentAssistServer(t)
 
-	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	require.NoError(t, err)
 
 	result, err := srv.StopAgentAssist(context.Background(), "call-1")
@@ -246,7 +248,7 @@ func TestStopAgentAssist_MatchesByCallIDPrefix(t *testing.T) {
 	fake := &fakeAgentAssistClient{}
 	srv.assist = fake
 
-	_, err := srv.StartAgentAssist(context.Background(), fullCallID, nil)
+	_, err := srv.StartAgentAssist(context.Background(), fullCallID, nil, agentAssistTarget{})
 	require.NoError(t, err)
 
 	result, err := srv.StopAgentAssist(context.Background(), "12344555")
@@ -258,7 +260,7 @@ func TestStopAgentAssist_MatchesByCallIDPrefix(t *testing.T) {
 func TestSplitRecording_RejectedWhileInAgentAssistMode(t *testing.T) {
 	srv, _, _ := newTestAgentAssistServer(t)
 
-	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	require.NoError(t, err)
 
 	_, err = srv.SplitRecording(context.Background(), "call-1", nil)
@@ -268,7 +270,7 @@ func TestSplitRecording_RejectedWhileInAgentAssistMode(t *testing.T) {
 func TestFinalizeSession_CompletesInProgressAgentAssistConversation(t *testing.T) {
 	srv, sess, fake := newTestAgentAssistServer(t)
 
-	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	require.NoError(t, err)
 
 	srv.finalizeSession(context.Background(), sess, "2026-01-01T00:00:00Z", nil, "bye")
@@ -399,11 +401,13 @@ func TestDialogflowEndpoint(t *testing.T) {
 	}
 }
 
-// The endpoint is derived in NewAgentAssistClient and the resource name in
-// Start; this guards against the two normalizing differently. location() reads
-// only cfg, so the nil Dialogflow clients here are harmless.
+// The endpoint is derived in dialClients and the resource name in Start; this
+// guards against the two normalizing differently. resolveTarget() reads
+// only cfg, so having no Dialogflow clients here is harmless.
 func TestGoogleAgentAssistClientLocationUsesSharedNormalization(t *testing.T) {
-	c := &googleAgentAssistClient{cfg: &Config{AgentAssistLocationID: "  US-Central1 "}}
-	assert.Equal(t, "us-central1", c.location())
+	c := &googleAgentAssistClient{cfg: &Config{AgentAssistConversationProfileID: "default", AgentAssistLocationID: "  US-Central1 "}}
+	assert.Equal(t, agentAssistTarget{ProfileID: "default", Location: "us-central1"}, c.resolveTarget(agentAssistTarget{}))
+	override := agentAssistTarget{ProfileID: "other", Location: "europe-west2"}
+	assert.Equal(t, override, c.resolveTarget(override))
 	assert.Equal(t, "us-central1-dialogflow.googleapis.com:443", dialogflowEndpoint(c.cfg.AgentAssistLocationID))
 }

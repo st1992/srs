@@ -118,6 +118,9 @@ func (a *apiServer) handleSplitRecording(w http.ResponseWriter, r *http.Request)
 type startAgentAssistRequest struct {
 	CallID   string         `json:"call_id"`
 	Metadata map[string]any `json:"metadata"`
+	// Optional; used only as a pair (see parseAgentAssistTarget).
+	ConversationProfileID string `json:"aa_conversation_profile_id"`
+	Region                string `json:"aa_region"`
 }
 
 type stopAgentAssistRequest struct {
@@ -149,7 +152,19 @@ func (a *apiServer) handleStartAgentAssist(w http.ResponseWriter, r *http.Reques
 	if req.Metadata == nil {
 		req.Metadata = map[string]any{}
 	}
-	result, err := a.recorder.StartAgentAssist(r.Context(), req.CallID, req.Metadata)
+	target, ignoredLone, err := parseAgentAssistTarget(req.ConversationProfileID, req.Region)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if ignoredLone {
+		a.log.Warn("aa_conversation_profile_id and aa_region must be sent together; using the configured agent assist profile",
+			"callID", req.CallID,
+			"profileID", req.ConversationProfileID,
+			"region", req.Region,
+		)
+	}
+	result, err := a.recorder.StartAgentAssist(r.Context(), req.CallID, req.Metadata, target)
 	if err != nil {
 		a.writeCallError(w, err)
 		return

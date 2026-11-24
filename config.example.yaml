@@ -92,6 +92,8 @@ agent_assist_project_id: ""
 # us-west1, northamerica-northeast1, europe-west1, europe-west2, europe-west3,
 # europe-west4, europe-west6, asia-southeast1, asia-southeast2, asia-northeast1,
 # asia-south1, australia-southeast1.
+# Default region and profile: a start request may override both together with
+# aa_region and aa_conversation_profile_id (see docs/AGENT_ASSIST_API.md).
 agent_assist_location_id: "global"
 agent_assist_conversation_profile_id: ""
 agent_assist_sample_rate_hertz: 8000

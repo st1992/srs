@@ -12,20 +12,22 @@ Set in `config.yaml` (see `config.example.yaml`):
 | Field | Purpose |
 |---|---|
 | `agent_assist_project_id` | GCP project hosting the Dialogflow ES agent. |
-| `agent_assist_location_id` | Dialogflow region; must match the conversation profile's region. Also selects the service endpoint. Default `global`. |
-| `agent_assist_conversation_profile_id` | Conversation profile to use. |
+| `agent_assist_location_id` | Default Dialogflow region; must match the conversation profile's region. Also selects the service endpoint. Default `global`. |
+| `agent_assist_conversation_profile_id` | Default conversation profile; a `/start` request can override it together with the region. |
 | `agent_assist_sample_rate_hertz` | Audio sample rate sent/received. Default `8000` (matches PCMU). |
 | `agent_assist_send_queue_packets` | Per-leg outbound buffer of 20 ms packets that covers a stream reopen; when full, new packets are dropped with a warning and the leg keeps running. Default `1500` (~30 s). |
 | `agent_assist_end_user_labels` / `agent_assist_human_agent_labels` | Which leg label (e.g. `inbound`/`outbound`) maps to which Dialogflow participant role. |
 
 `gcp_credentials_file` is reused for Dialogflow auth (same credentials as
 GCS). If `agent_assist_project_id` or `agent_assist_conversation_profile_id`
-is empty, the client is disabled and `/start` returns an error.
+is empty, the client is disabled and `/start` returns an error, even if the
+request names a profile.
 
 ### Regions
 
 Both global and regional conversation profiles are supported.
-`agent_assist_location_id` does two things: it goes into the resource name
+The region (`agent_assist_location_id`, or `aa_region` on a `/start` request)
+does two things: it goes into the resource name
 (`projects/P/locations/L/conversationProfiles/ID`) *and* it selects the
 Dialogflow host — `global` uses `dialogflow.googleapis.com`, every other region
 uses `<region>-dialogflow.googleapis.com`. Both must agree, because the global
@@ -40,8 +42,9 @@ multi-region and follows the same pattern: `us-dialogflow.googleapis.com`.)
 
 The value isn't validated against that list, so a new Google region works
 without a code change — but a typo only surfaces as a DNS error on the first
-`/start`. The resolved endpoint is logged at startup under
-`component=agent_assist`, so check there first:
+`/start` that uses it, which then fails within about 20 seconds. The resolved
+endpoint is logged under `component=agent_assist` (at startup for the
+configured region, on first use for any other), so check there first:
 
 ```
 level=INFO component=agent_assist msg="agent assist dialogflow endpoint resolved"
@@ -68,7 +71,12 @@ Dialogflow conversation.
 
 ```json
 // Request
-{ "call_id": "abc123", "metadata": { "ticket": "t1" } }
+{
+  "call_id": "abc123",
+  "metadata": { "ticket": "t1" },
+  "aa_conversation_profile_id": "PROFILE_ID", // optional
+  "aa_region": "us-central1"                  // optional
+}
 
 // 200 OK
 { "call_id": "abc123", "agent_assist_conversation_id": "conv-xyz", "state": "agent_assist" }
@@ -77,6 +85,24 @@ Dialogflow conversation.
 - `call_id` may be the full Call-ID or just its leading `_`-delimited prefix
   (e.g. `12344555` for `12344555_438274632_47324923@10.10.10.153`), same as
   `/v1/recording/split`. The response always echoes back the full Call-ID.
+- `aa_conversation_profile_id` and `aa_region` are optional and pick the
+  conversation profile for this conversation only. Send both or neither:
+
+  | Request | Result |
+  |---|---|
+  | Both set | That profile and region are used |
+  | Neither set (missing or blank) | Configured profile and region are used |
+  | Only one set | It is ignored, the configured pair is used, and a warning is logged |
+  | Both set, one malformed | `400`; the call keeps recording |
+  | Both set, rejected by Google | `500`; the call keeps recording. There is no retry on the default profile |
+
+  Pass the bare profile ID, not a `projects/...` name. The project and
+  credentials always come from config, so the service account needs access to
+  every profile used, and pods need outbound access to every region's endpoint.
+- Recorder versions without these fields reject them with `400` (unknown
+  field), so upgrade all pods before callers start sending them.
+- The fields are ignored if the call is already in Agent Assist mode; to switch
+  profiles, call `/stop` and then `/start`.
 - Idempotent: calling `/start` again while already in Agent Assist mode
   returns the existing conversation without opening a new one.
 - `404` if the call isn't found; `409` if the call already ended, or if a

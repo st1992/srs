@@ -82,7 +82,7 @@ func TestCompleteConversationWithRetry_StopsWhenParentDone(t *testing.T) {
 
 func TestStopAgentAssist_CompletesDespiteCancelledRequestContext(t *testing.T) {
 	srv, _, fake := newTestAgentAssistServer(t)
-	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -99,7 +99,7 @@ func TestAgentAssistAPI_StopCompletesAfterClientDisconnect(t *testing.T) {
 	cfg := *srv.cfg
 	api := NewAPIServer(&cfg, srv, testLogger())
 
-	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -113,7 +113,7 @@ func TestAgentAssistAPI_StopCompletesAfterClientDisconnect(t *testing.T) {
 
 func TestReapOnce_FinalizesStaleSession(t *testing.T) {
 	srv, sess, fake := newTestAgentAssistServer(t)
-	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	require.NoError(t, err)
 	metaBefore := len(srv.metaUploader.(*captureUploader).Enqueued())
 
@@ -131,7 +131,7 @@ func TestReapOnce_FinalizesStaleSession(t *testing.T) {
 func TestReapOnce_FlagsOnlyWhenFinalizeDisabled(t *testing.T) {
 	srv, sess, fake := newTestAgentAssistServer(t)
 	srv.cfg.FinalizeStaleSessions = false
-	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	require.NoError(t, err)
 
 	srv.reapOnce(sess.CreatedAt.Add(time.Duration(srv.cfg.MaxCallDurationHours)*time.Hour + time.Minute))
@@ -144,7 +144,7 @@ func TestReapOnce_FlagsOnlyWhenFinalizeDisabled(t *testing.T) {
 func TestReapOnce_FinalizesIdleSessionOnlyWhenAllLegsIdle(t *testing.T) {
 	srv, sess, fake := newTestAgentAssistServer(t)
 	srv.cfg.SessionIdleTimeoutSec = 30
-	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	require.NoError(t, err)
 
 	now := time.Now()
@@ -183,7 +183,7 @@ func TestReapOnce_IdleDisabledByDefault(t *testing.T) {
 func TestClaimSession_ByeRacingReaperFinalizesOnce(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		srv, sess, fake := newTestAgentAssistServer(t)
-		_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+		_, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 		require.NoError(t, err)
 
 		var wins atomic.Int32
@@ -225,7 +225,7 @@ func TestStop_CompletesAgentAssistSessionsInParallel(t *testing.T) {
 	for i := 0; i < n; i++ {
 		other, sess := newTestSplitServerWithCallID(t, fmt.Sprintf("call-%d", i))
 		other.assist = fake
-		_, err := other.StartAgentAssist(context.Background(), sess.CallID, nil)
+		_, err := other.StartAgentAssist(context.Background(), sess.CallID, nil, agentAssistTarget{})
 		require.NoError(t, err)
 		srv.sessions.Set(sess.CallID, sess)
 	}
@@ -241,7 +241,7 @@ func TestStop_CompletesAgentAssistSessionsInParallel(t *testing.T) {
 func TestCompleteAgentAssist_LogsFailureWithoutPanicking(t *testing.T) {
 	srv, _, fake := newTestAgentAssistServer(t)
 	fake.completeErr = errors.New("boom")
-	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil)
+	_, err := srv.StartAgentAssist(context.Background(), "call-1", nil, agentAssistTarget{})
 	require.NoError(t, err)
 
 	_, err = srv.StopAgentAssist(context.Background(), "call-1")
