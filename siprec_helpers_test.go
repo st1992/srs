@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/livekit/sipgo/sip"
@@ -196,6 +200,13 @@ func TestSIPURIUserPart(t *testing.T) {
 		{"sips:bob@example.com", ""},
 		// No user part (host-only URI)
 		{"sip:example.com", "example.com"},
+		// Parameters inside the user part, and a leading '+'
+		{"<sip:4694733291;phone-context=true@10.87.18.117>;tag=x", "4694733291"},
+		{"<sip:+14694733291;phone-context=+1@10.87.18.117;user=phone>;tag=x", "14694733291"},
+		{"sip:4694733291;phone-context=example.com@host", "4694733291"},
+		{"sip:4694733291;npdi;rn=123;phone-context=+1@host", "4694733291"},
+		{"<sip:+14694733291@host>;tag=x", "14694733291"},
+		{"sip:;phone-context=+1@host", ""},
 		// Empty / no sip: prefix
 		{"SIPREC-SRS", ""},
 		{"", ""},
@@ -225,4 +236,59 @@ func TestMetaDNIS_ANI_NoCallData(t *testing.T) {
 func TestMetaDNIS_ANI_Nil(t *testing.T) {
 	assert.Equal(t, "", metaDNIS(nil))
 	assert.Equal(t, "", metaANI(nil))
+}
+
+// Parameters and '+' are dropped from the parsed ANI/DNIS, and so from file
+// names, while the raw headers are kept as the SBC sent them.
+func TestANI_DNIS_PhoneContextOnlyCleansFileNames(t *testing.T) {
+	const rawFrom = "<sip:+14694733291;phone-context=+1@10.87.18.120>;tag=a"
+	const rawTo = "<sip:8777953602;phone-context=true@10.87.18.120;user=phone>;tag=b"
+	esc := strings.NewReplacer("<", "&lt;", ">", "&gt;")
+	meta, err := ParseSiprecMetadata(strings.NewReplacer(
+		"&lt;sip:4694733291@10.87.18.120&gt;;isup-oli=62;tag=gK0c3ab0a7", esc.Replace(rawFrom),
+		"&lt;sip:8777953602@10.87.18.120:5060;user=phone&gt;;tag=as7df1d0cd", esc.Replace(rawTo),
+	).Replace(testSonusInviteMetadata))
+	require.NoError(t, err)
+	assert.Equal(t, "14694733291", metaANI(meta))
+	assert.Equal(t, "8777953602", metaDNIS(meta))
+
+	srv, sess := newTestSplitServer(t)
+	sess.ANI, sess.DNIS, sess.Metadata = metaANI(meta), metaDNIS(meta), meta
+	sink, err := newFileSink(srv.cfg.RecordingDir, sess.CallID, sess.DNIS, sess.ANI, 42, "inbound")
+	require.NoError(t, err)
+	require.NoError(t, sink.Close())
+	jsonPath, err := srv.writeSegmentMetadataJSON(sess, &callSegment{StartMs: 42}, nil, nil)
+	require.NoError(t, err)
+
+	stem := sanitizeFileComponent(sess.CallID) + "-8777953602-14694733291-42"
+	assert.Equal(t, stem+"-inbound.ulaw", filepath.Base(sink.Path()))
+	assert.Equal(t, stem+".json", filepath.Base(jsonPath))
+
+	data, err := os.ReadFile(jsonPath)
+	require.NoError(t, err)
+	var record callMetadataRecord
+	require.NoError(t, json.Unmarshal(data, &record))
+	var got *CallData
+	for _, g := range record.InviteMetadata.Groups {
+		if g.CallData != nil {
+			got = g.CallData
+		}
+	}
+	require.NotNil(t, got)
+	assert.Equal(t, rawFrom, got.FromHdr)
+	assert.Equal(t, rawTo, got.ToHdr)
+}
+
+func TestANI_DNIS_SIPHeaderFallback(t *testing.T) {
+	req := sip.NewRequest(sip.INVITE, sip.Uri{User: "SIPREC-SRS", Host: "example.com"})
+	// The SIP parser puts everything before '@' in User, parameters included.
+	from := sip.Uri{User: "+14694733291;phone-context=+1", Host: "example.com"}
+	to := sip.Uri{User: "8777953602;phone-context=true", Host: "example.com"}
+	req.AppendHeader(&sip.FromHeader{Address: from, Params: sip.NewParams()})
+	req.AppendHeader(&sip.ToHeader{Address: to, Params: sip.NewParams()})
+
+	assert.Equal(t, "14694733291", sipURIUserPart(fromURI(req)))
+	assert.Equal(t, "8777953602", sipURIUserPart(toURI(req)))
+	assert.Equal(t, "sip:+14694733291;phone-context=+1@example.com", fromURI(req))
+	assert.Equal(t, "sip:8777953602;phone-context=true@example.com", toURI(req))
 }

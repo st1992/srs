@@ -301,7 +301,9 @@ func CreateSiprecResponse(originalInvite *sip.Request, combinedSDP string, conta
 
 // sipURIUserPart extracts the user (phone/name) part from a SIP URI string.
 // It handles both bare URIs ("sip:1234@host") and angle-bracket forms
-// ("<sip:1234@host>;params"). Returns "" if no user part can be found.
+// ("<sip:1234@host>;params"). Parameters attached to the user part (such as
+// ";phone-context=+1") and a leading '+' are dropped, leaving only the number.
+// Returns "" if no user part can be found.
 func sipURIUserPart(uri string) string {
 	// Strip surrounding whitespace and angle brackets.
 	s := strings.TrimSpace(uri)
@@ -310,14 +312,16 @@ func sipURIUserPart(uri string) string {
 	} else {
 		s = s[i+4:]
 	}
-	// Take everything up to the first '@'; if absent, up to ';' or '>'.
+	// Take everything up to the first '@', then drop any parameters: they can
+	// sit inside the user part ("1234;phone-context=+1@host") or, when there
+	// is no '@', after the host.
 	if i := strings.IndexByte(s, '@'); i >= 0 {
-		return s[:i]
+		s = s[:i]
 	}
 	if i := strings.IndexAny(s, ";>"); i >= 0 {
-		return s[:i]
+		s = s[:i]
 	}
-	return s
+	return strings.TrimPrefix(s, "+")
 }
 
 // metaDNIS returns the DNIS (called-party number) from the first group's
